@@ -4,16 +4,16 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from gui.main_window import MainWindow
+from gui.splash_screen import StartupCoordinator
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    w = MainWindow()
-    w.show()
+    startup = StartupCoordinator(app)
+    app.startup_coordinator = startup  # Keep a strong reference for app lifetime.
+    startup.start()
     return app.exec()
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

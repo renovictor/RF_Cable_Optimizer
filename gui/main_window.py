@@ -32,7 +32,7 @@ from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
 from gui.plots import MplCanvas
 from models.cable_parameters import AttenuationUnit, CableModelMode, CableParameters, CableSpecification
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
-from models.operating_points import DX7_OPERATING_POINTS, find_operating_point
+from models.operating_points import find_operating_point
 from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, MatcherModelMode, SystemParameters
 from models.validation import validate_inputs
 from rf.coax import inner_diameter_for_target_z0, z0_from_geometry
@@ -81,6 +81,9 @@ class MainWindow(QMainWindow):
             QLineEdit, QComboBox, QTableWidget { background: #1e293b; border: 1px solid #475569; padding: 5px; }
             QPushButton { background-color: #2563eb; color: white; border-radius: 6px; padding: 6px 10px; }
             QPushButton:hover { background-color: #1d4ed8; }
+            QSlider::groove:horizontal { border: 1px solid #9a3412; height: 8px; background: #1f2937; border-radius: 4px; }
+            QSlider::sub-page:horizontal { background: #ea580c; border-radius: 4px; }
+            QSlider::handle:horizontal { background: #f97316; border: 1px solid #9a3412; width: 18px; margin: -5px 0; border-radius: 9px; }
             """
         )
 
@@ -92,9 +95,9 @@ class MainWindow(QMainWindow):
         op_box = QGroupBox("Operating Point")
         op_layout = QFormLayout(op_box)
         self.operating_point_combo = QComboBox()
-        self.operating_point_combo.addItem("Custom Operating Point")
-        for p in sorted(DX7_OPERATING_POINTS, key=lambda x: x.power_w):
-            self.operating_point_combo.addItem(f"{int(p.power_w)} W")
+        for power_w in range(100, 2001, 100):
+            self.operating_point_combo.addItem(f"{power_w} W")
+        self.operating_point_combo.setCurrentText("1300 W")
         self.operating_point_combo.currentTextChanged.connect(self._on_operating_point_changed)
         op_layout.addRow("Select:", self.operating_point_combo)
         self.measured_load = QLabel("Load: -")
@@ -153,6 +156,7 @@ class MainWindow(QMainWindow):
         chamber = QFormLayout(chamber_box)
         self.chamber_mode = QComboBox()
         self.chamber_mode.addItems([m.value for m in ChamberImpedanceMode])
+        self.chamber_mode.setCurrentText(ChamberImpedanceMode.DERIVED_FROM_MATCH.value)
         self.chamber_mode.currentTextChanged.connect(self._toggle_chamber_fields)
         self.zl_r = _line_edit("", "Chamber impedance real part [ohm].")
         self.zl_x = _line_edit("", "Chamber impedance imaginary part [ohm].")
@@ -199,6 +203,7 @@ class MainWindow(QMainWindow):
         self.att = _line_edit("0.6", "Datasheet attenuation value.")
         self.att_unit = QComboBox()
         self.att_unit.addItems([u.value for u in AttenuationUnit])
+        self.att_unit.setCurrentText(AttenuationUnit.DB_PER_100FT.value)
         self.rp = _line_edit("", "R' [ohm/m]")
         self.lp = _line_edit("", "L' [H/m]")
         self.gp = _line_edit("", "G' [S/m]")
@@ -248,14 +253,21 @@ class MainWindow(QMainWindow):
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet("color:#f87171;")
-        self.live_metrics_label = QLabel("Current VSWR: -    Current Cable Loss: -")
+        self.live_metrics_label = QLabel(self._format_live_metrics(None, None))
         self.live_metrics_label.setStyleSheet("color:#93c5fd;")
+
+        action_row = QHBoxLayout()
+        self.run_btn_cable = QPushButton("Run Analysis")
+        self.run_btn_cable.clicked.connect(self.recalculate)
+        action_row.addWidget(self.run_btn_cable)
+        action_row.addStretch(1)
 
         layout.addWidget(cable_box, 0, 0)
         layout.addWidget(spec_box, 1, 0)
         layout.addWidget(cards, 0, 1, 2, 1)
         layout.addWidget(self.warning_label, 2, 0, 1, 2)
-        layout.addWidget(self.live_metrics_label, 3, 0, 1, 2)
+        layout.addLayout(action_row, 3, 0, 1, 2)
+        layout.addWidget(self.live_metrics_label, 4, 0, 1, 2)
         self._toggle_rlgc_fields()
 
     @staticmethod
@@ -273,15 +285,25 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         probe_row = QHBoxLayout()
         self.probe_pos = _line_edit("0.15", "Probe position from Match Output [m].")
+        self.probe_pos.setMaximumWidth(90)
         self.probe_slider = QSlider(Qt.Horizontal)
         self.probe_slider.setRange(0, 1000)
+        self.probe_slider.setMinimumWidth(380)
+        self.probe_slider.setStyleSheet(
+            """
+            QSlider::groove:horizontal { border: 1px solid #9a3412; height: 10px; background: #111827; border-radius: 5px; }
+            QSlider::sub-page:horizontal { background: #ea580c; border-radius: 5px; }
+            QSlider::add-page:horizontal { background: #374151; border-radius: 5px; }
+            QSlider::handle:horizontal { background: #fb923c; border: 1px solid #c2410c; width: 20px; margin: -6px 0; border-radius: 10px; }
+            """
+        )
         self.probe_slider.valueChanged.connect(self._on_probe_slider)
         self.probe_pos.editingFinished.connect(self._on_probe_text)
         probe_row.addWidget(QLabel("Probe Position [m]"))
         probe_row.addWidget(self.probe_pos)
-        probe_row.addWidget(self.probe_slider, 1)
+        probe_row.addWidget(self.probe_slider, 3)
         self.probe_values = QLabel("Probe: Input Required")
-        probe_row.addWidget(self.probe_values)
+        probe_row.addWidget(self.probe_values, 2)
         layout.addLayout(probe_row)
 
         positions_row = QHBoxLayout()
@@ -405,16 +427,21 @@ class MainWindow(QMainWindow):
 
     def _on_operating_point_changed(self, text: str) -> None:
         if "W" in text:
-            p = find_operating_point(float(text.replace("W", "").strip()))
+            selected_power_w = float(text.replace("W", "").strip())
+            self.p_gen_w.setText(f"{selected_power_w:g}")
+            self.p_match_out.setText(f"{selected_power_w:g}")
+            p = find_operating_point(selected_power_w)
             if p is not None:
-                self.p_gen_w.setText(str(p.power_w))
-                self.p_match_out.setText(str(p.power_w))
                 self.zm_r.setText(str(p.zreal_ohm))
                 self.zm_x.setText(str(p.zimag_ohm))
                 self.vpp.setText(str(p.vpp_v))
                 self.measured_load.setText(f"Load: {p.load_setting}")
                 self.measured_tune.setText(f"Tune: {p.tune_setting}")
                 self.measured_iout.setText(f"Measured Iout - Untrusted: {p.iout_a_untrusted} A")
+            else:
+                self.measured_load.setText("Load: -")
+                self.measured_tune.setText("Tune: -")
+                self.measured_iout.setText("Measured Iout - Untrusted: -")
         self.recalculate()
 
     def _collect_models(self) -> tuple[SystemParameters, CableParameters, ChamberParameters]:
@@ -472,12 +499,12 @@ class MainWindow(QMainWindow):
             if not valid.valid:
                 self.system_diag.setText("Input Required:\n" + "\n".join(valid.errors))
                 self.last_result = None
-                self.live_metrics_label.setText("Current VSWR: -    Current Cable Loss: -")
+                self.live_metrics_label.setText(self._format_live_metrics(None, system))
                 return
             result = analyze_cable(system, cable, chamber)
             self.last_result = result
             self.system_diag.setText(self._format_consistency_diagnostic(system))
-            self._update_cards(result)
+            self._update_cards(result, system)
             all_warnings = valid.warnings + result.warnings
             if system.sparam_frequency_mhz is not None and abs(system.sparam_frequency_mhz - system.frequency_mhz) > 0.5:
                 all_warnings.append("S-parameter frequency differs from simulation frequency.")
@@ -488,7 +515,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.last_result = None
             self.system_diag.setText(f"Input Required / Error: {exc}")
-            self.live_metrics_label.setText("Current VSWR: -    Current Cable Loss: -")
+            self.live_metrics_label.setText(self._format_live_metrics(None, None))
 
     def _format_consistency_diagnostic(self, system: SystemParameters) -> str:
         if system.measured_vpp_v is None:
@@ -504,7 +531,7 @@ class MainWindow(QMainWindow):
             f"Vrms(Vpp)={vrms:.2f} V, Icalc={icalc:.2f} A, Pcalc={pcalc:.2f} W"
         )
 
-    def _update_cards(self, r: CableAnalysisResult) -> None:
+    def _update_cards(self, r: CableAnalysisResult, system: SystemParameters) -> None:
         vmax_idx = int(np.argmax(np.abs(r.v_rms)))
         imax_idx = int(np.argmax(np.abs(r.i_rms)))
         wmax_idx = int(np.argmax(r.p_total_loss_w_per_m))
@@ -514,8 +541,19 @@ class MainWindow(QMainWindow):
         self.card_labels["vmax"].setText(f"MAX VOLTAGE\n{np.abs(r.v_rms[vmax_idx]):.2f} Vrms @ {r.z_m[vmax_idx]:.3f} m")
         self.card_labels["imax"].setText(f"MAX CURRENT\n{np.abs(r.i_rms[imax_idx]):.2f} Arms @ {r.z_m[imax_idx]:.3f} m")
         self.card_labels["wmax"].setText(f"MAX LOCAL HEATING\n{r.p_total_loss_w_per_m[wmax_idx]:.3f} W/m @ {r.z_m[wmax_idx]:.3f} m")
-        self.live_metrics_label.setText(
-            f"Current VSWR: {r.vswr:.3f}    Current Cable Loss: {r.cable_loss_percent:.2f}% ({r.cable_loss_w:.2f} W)"
+        self.live_metrics_label.setText(self._format_live_metrics(r, system))
+
+    def _format_live_metrics(self, r: CableAnalysisResult | None, system: SystemParameters | None) -> str:
+        thresholds = (system.thresholds if system is not None else SystemParameters().thresholds)
+        if r is None:
+            return (
+                f"Current VSWR - (limit at {thresholds.vswr:g})    "
+                f"Current Cable Loss - (limit at {thresholds.cable_loss_percent:g}%)"
+            )
+        return (
+            f"Current VSWR {r.vswr:.3f} (limit at {thresholds.vswr:g})    "
+            f"Current Cable Loss: {r.cable_loss_percent:.2f}% ({r.cable_loss_w:.2f} W) "
+            f"(limit at {thresholds.cable_loss_percent:g}%)"
         )
 
     def _draw_distribution(self) -> None:
