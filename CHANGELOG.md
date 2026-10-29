@@ -1,5 +1,11 @@
 # Changelog
 
+## V2026.10.3 - 2026-10-30
+
+- Corrected power reference-plane terminology and calculations around Match Input / Match Output / Cable End Delivered power.
+- Added File/Help menu bar and non-modal dedicated Help window.
+- Added COMCRAFT AA-11459 preset support with source-status labeling, attenuation source modes, interpolation labeling, and power-rating reference display.
+
 ## V2026.10.1 - 2026-10-29
 
 - Added live Cable Analysis readout for current VSWR and cable loss (percent and watts).

@@ -20,8 +20,8 @@ def validate_inputs(system: SystemParameters, cable: CableParameters, chamber: C
 
     if system.frequency_mhz <= 0:
         errors.append("Frequency must be > 0 MHz.")
-    if system.generator_power_w < 0:
-        errors.append("Generator power must be >= 0 W.")
+    if system.match_input_power_w < 0:
+        errors.append("Match input power must be >= 0 W.")
     if cable.length_m is None or cable.length_m <= 0:
         errors.append("Cable length is required and must be > 0 m.")
     if cable.z0_ohm <= 0:
@@ -45,4 +45,3 @@ def validate_inputs(system: SystemParameters, cable: CableParameters, chamber: C
         warnings.append("Match output resistance is non-positive; normalization may be invalid.")
 
     return ValidationResult(valid=len(errors) == 0, errors=errors, warnings=warnings)
-

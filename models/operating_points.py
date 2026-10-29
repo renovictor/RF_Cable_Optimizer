@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class OperatingPoint:
-    power_w: float
+    match_input_power_w: float
     load_setting: float
     tune_setting: float
     vpp_v: float
@@ -31,9 +31,8 @@ DX7_OPERATING_POINTS: list[OperatingPoint] = [
 ]
 
 
-def find_operating_point(power_w: float) -> OperatingPoint | None:
+def find_operating_point(match_input_power_w: float) -> OperatingPoint | None:
     for p in DX7_OPERATING_POINTS:
-        if p.power_w == power_w:
+        if p.match_input_power_w == match_input_power_w:
             return p
     return None
-

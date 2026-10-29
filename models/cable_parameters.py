@@ -18,8 +18,21 @@ class AttenuationUnit(str, Enum):
 @dataclass
 class CableSpecification:
     preset_name: str = "Custom"
+    cable_family: str = "Unknown / Input Required"
     cable_model: str = "Unknown / Input Required"
     part_number: str = "Unknown / Input Required"
+    assembly_designation: str = "Unknown / Input Required"
+    assembly_length_m: float | None = None
+    outer_diameter_mm: float | None = None
+    center_conductor_diameter_mm: float | None = None
+    dielectric_diameter_mm: float | None = None
+    center_conductor_type: str = "Unknown / Input Required"
+    outer_shield: str = "Unknown / Input Required"
+    jacket: str = "Unknown / Input Required"
+    temperature_range_c: str = "Unknown / Input Required"
+    min_bend_radius_mm: float | None = None
+    outer_conductor_inner_d_mm: float | None = None
+    attenuation_status: str = "USER INPUT"
     max_voltage_rms: float | None = None
     max_current_rms: float | None = None
     max_temperature_c: float | None = None

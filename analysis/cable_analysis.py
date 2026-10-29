@@ -42,7 +42,7 @@ class CableAnalysisResult:
     vswr: float
     return_loss_db: float
     electrical_length_deg: float
-    generator_power_w: float
+    match_input_power_w: float
     match_output_power_w: float
     match_output_power_source_label: str
     match_loss_w: float
@@ -59,23 +59,28 @@ class CableAnalysisResult:
 def _match_output_power(system: SystemParameters, z_in: complex) -> tuple[float, str]:
     if system.match_output_power_source == MatchOutputPowerSource.USER:
         if system.match_output_power_w is None:
-            raise ValueError("Match output power source is USER but value is not provided.")
+            return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED"
         return system.match_output_power_w, MatchOutputPowerSource.USER.value
     if system.match_output_power_source == MatchOutputPowerSource.CALCULATED:
         if system.matcher_model_mode == MatcherModelMode.USER_S:
-            s = SParameters(
-                s11=system.s11,
-                s12=system.s12,
-                s21=system.s21,
-                s22=system.s22,
-                zref_ohm=system.sparam_ref_impedance_ohm,
-            )
-            _, _, eta = evaluate_match_efficiency(
-                s, complex(system.generator_impedance_ohm, 0.0), z_in, v_source_rms=1 + 0j
-            )
-            return system.generator_power_w * eta, "CALCULATED (S-PARAMETERS)"
-        return system.generator_power_w * system.match_efficiency_percent / 100.0, "CALCULATED (EFFICIENCY)"
-    return system.generator_power_w, MatchOutputPowerSource.IDEAL.value
+            try:
+                s = SParameters(
+                    s11=system.s11,
+                    s12=system.s12,
+                    s21=system.s21,
+                    s22=system.s22,
+                    zref_ohm=system.sparam_ref_impedance_ohm,
+                )
+                _, _, eta = evaluate_match_efficiency(
+                    s, complex(system.generator_impedance_ohm, 0.0), z_in, v_source_rms=1 + 0j
+                )
+                eta = min(max(float(eta), 0.0), 1.0)
+                return system.match_input_power_w * eta, "CALCULATED FROM MATCHER MODEL (S-PARAMETERS)"
+            except Exception:
+                return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED"
+        eta = min(max(system.match_efficiency_percent / 100.0, 0.0), 1.0)
+        return system.match_input_power_w * eta, "CALCULATED FROM MATCHER MODEL (EFFICIENCY)"
+    return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED"
 
 
 def analyze_cable(
@@ -114,9 +119,9 @@ def analyze_cable(
         z_in = z_match_measured
         z_load = deembed_load_impedance(z_in, z0, gamma, line_length)
 
-    p_generator = system.generator_power_w
+    p_match_input = system.match_input_power_w
     p_match_output, p_match_source = _match_output_power(system, z_in)
-    p_match_loss = p_generator - p_match_output
+    p_match_loss = p_match_input - p_match_output
     p_cable_input = p_match_output
     v0, _ = normalize_boundary_from_real_power(z_in, p_cable_input)
 
@@ -138,8 +143,8 @@ def analyze_cable(
     p_chamber = p_cable_output
     p_cable_loss = p_cable_input - p_cable_output
     p_cable_loss_pct = (p_cable_loss / p_cable_input * 100.0) if p_cable_input > 0 else 0.0
-    p_balance_err = p_generator - p_match_loss - p_cable_loss - p_chamber
-    p_balance_err_pct = (p_balance_err / p_generator * 100.0) if p_generator > 0 else 0.0
+    p_balance_err = p_match_input - p_match_loss - p_cable_loss - p_chamber
+    p_balance_err_pct = (p_balance_err / p_match_input * 100.0) if p_match_input > 0 else 0.0
 
     gl = reflection_coefficient(z_load, z0)
     warnings: list[str] = []
@@ -172,7 +177,7 @@ def analyze_cable(
         vswr=vswr(gl),
         return_loss_db=return_loss_db(gl),
         electrical_length_deg=electrical_length_deg(frequency_hz, cable.velocity_factor, line_length),
-        generator_power_w=p_generator,
+        match_input_power_w=p_match_input,
         match_output_power_w=p_match_output,
         match_output_power_source_label=p_match_source,
         match_loss_w=p_match_loss,

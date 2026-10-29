@@ -5,9 +5,9 @@ from enum import Enum
 
 
 class MatchOutputPowerSource(str, Enum):
-    USER = "MEASURED/USER"
-    CALCULATED = "CALCULATED"
-    IDEAL = "IDEAL/ASSUMED"
+    CALCULATED = "CALCULATED FROM MATCHER MODEL"
+    USER = "MEASURED / USER INPUT"
+    IDEAL = "IDEAL MATCHER"
 
 
 class MatcherModelMode(str, Enum):
@@ -36,9 +36,9 @@ class WarningThresholds:
 
 @dataclass
 class SystemParameters:
-    # Reference plane: generator output
+    # Reference plane: match input
     frequency_mhz: float = 60.0
-    generator_power_w: float = 1300.0
+    match_input_power_w: float = 1300.0
     generator_impedance_ohm: float = 50.0
     # Matcher behavior
     match_efficiency_percent: float = 100.0

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import csv
+import math
 from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QDoubleValidator
+from PySide6.QtGui import QAction, QDoubleValidator, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -29,7 +30,9 @@ from PySide6.QtWidgets import (
 
 from analysis.cable_analysis import CableAnalysisResult, analyze_cable
 from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
+from gui.help_window import HelpWindow
 from gui.plots import MplCanvas
+from models.cable_presets import AA11459_ATTENUATION_DB_PER_100FT, AA11459_POWER_RATING_KW, interpolate_log_frequency
 from models.cable_parameters import AttenuationUnit, CableModelMode, CableParameters, CableSpecification
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
 from models.operating_points import find_operating_point
@@ -46,6 +49,12 @@ def _line_edit(value: str, tooltip: str) -> QLineEdit:
     return w
 
 
+def _text_line_edit(value: str, tooltip: str) -> QLineEdit:
+    w = QLineEdit(value)
+    w.setToolTip(tooltip)
+    return w
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -54,6 +63,7 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.last_result: CableAnalysisResult | None = None
         self.last_sweep: SweepResult | None = None
+        self.help_window: HelpWindow | None = None
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -67,8 +77,33 @@ class MainWindow(QMainWindow):
         self._build_optimization_tab()
         self._build_coax_tab()
         self._build_summary_tab()
+        self._create_menu_bar()
 
         self.recalculate()
+
+    def _create_menu_bar(self) -> None:
+        menu = self.menuBar()
+        file_menu = menu.addMenu("File")
+        help_menu = menu.addMenu("Help")
+
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.setShortcutContext(Qt.ApplicationShortcut)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        self.exit_action = exit_action
+
+        help_action = QAction("RF Cable Optimizer Help", self)
+        help_action.triggered.connect(self._show_help_window)
+        help_menu.addAction(help_action)
+        self.help_action = help_action
+
+    def _show_help_window(self) -> None:
+        if self.help_window is None:
+            self.help_window = HelpWindow(self)
+        self.help_window.show()
+        self.help_window.raise_()
+        self.help_window.activateWindow()
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(
@@ -92,14 +127,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(tab, "System Input")
         layout = QGridLayout(tab)
 
-        op_box = QGroupBox("Operating Point")
+        op_box = QGroupBox("Operating Point (Match Input Power)")
         op_layout = QFormLayout(op_box)
         self.operating_point_combo = QComboBox()
-        for power_w in range(100, 2001, 100):
+        for power_w in range(100, 1301, 100):
             self.operating_point_combo.addItem(f"{power_w} W")
         self.operating_point_combo.setCurrentText("1300 W")
         self.operating_point_combo.currentTextChanged.connect(self._on_operating_point_changed)
-        op_layout.addRow("Select:", self.operating_point_combo)
+        op_layout.addRow("Select Match Input Power:", self.operating_point_combo)
         self.measured_load = QLabel("Load: -")
         self.measured_tune = QLabel("Tune: -")
         self.measured_iout = QLabel("Measured Iout - Untrusted: -")
@@ -108,10 +143,10 @@ class MainWindow(QMainWindow):
         op_layout.addRow(self.measured_tune)
         op_layout.addRow(self.measured_iout)
 
-        sys_box = QGroupBox("Generator & Matcher")
+        sys_box = QGroupBox("Match Input & Matcher")
         sys = QFormLayout(sys_box)
         self.freq_mhz = _line_edit("60", "System RF frequency in MHz.")
-        self.p_gen_w = _line_edit("1300", "Generator output real power at generator reference plane [W].")
+        self.p_match_in_w = _line_edit("1300", "Real RF power at matcher input reference plane [W].")
         self.z_gen = _line_edit("50", "Generator reference impedance [ohm].")
         self.p_match_out = _line_edit("1300", "Match Output real power at match-output reference plane [W].")
         self.match_eff = _line_edit("100", "Match efficiency [%] when using calculated mode.")
@@ -135,10 +170,10 @@ class MainWindow(QMainWindow):
         self.s_zref = _line_edit("50", "S-parameter reference impedance [ohm]")
         self.s_freq = _line_edit("60", "S-parameter frequency [MHz]")
         sys.addRow("Frequency [MHz]", self.freq_mhz)
-        sys.addRow("Generator Power [W]", self.p_gen_w)
+        sys.addRow("Match Input Power [W]", self.p_match_in_w)
         sys.addRow("Generator Z [ohm]", self.z_gen)
         sys.addRow("Match Output Power [W]", self.p_match_out)
-        sys.addRow("Power Source", self.power_source)
+        sys.addRow("Match Output Power Mode", self.power_source)
         sys.addRow("Match Efficiency [%]", self.match_eff)
         sys.addRow("Match Output R [ohm]", self.zm_r)
         sys.addRow("Match Output X [ohm]", self.zm_x)
@@ -204,6 +239,15 @@ class MainWindow(QMainWindow):
         self.att_unit = QComboBox()
         self.att_unit.addItems([u.value for u in AttenuationUnit])
         self.att_unit.setCurrentText(AttenuationUnit.DB_PER_100FT.value)
+        self.att_mode = QComboBox()
+        self.att_mode.addItems(
+            [
+                "MANUAL ENTRY",
+                "MANUFACTURER TABLE ONLY",
+                "INTERPOLATE BETWEEN PUBLISHED POINTS",
+            ]
+        )
+        self.att_mode.currentTextChanged.connect(self._on_attenuation_mode_changed)
         self.rp = _line_edit("", "R' [ohm/m]")
         self.lp = _line_edit("", "L' [H/m]")
         self.gp = _line_edit("", "G' [S/m]")
@@ -214,41 +258,98 @@ class MainWindow(QMainWindow):
         f.addRow("Velocity Factor", self.vf)
         f.addRow("Attenuation", self.att)
         f.addRow("Attenuation Unit", self.att_unit)
+        f.addRow("Attenuation Source", self.att_mode)
         f.addRow("R' [ohm/m]", self.rp)
         f.addRow("L' [H/m]", self.lp)
         f.addRow("G' [S/m]", self.gp)
         f.addRow("C' [F/m]", self.cp)
+        self.att_info = QLabel("Attenuation source status: USER INPUT")
+        self.att_info.setWordWrap(True)
+        self.att_info.setStyleSheet("color: #facc15;")
+        f.addRow(self.att_info)
 
         spec_box = QGroupBox("Cable Specification / Preset")
         s = QFormLayout(spec_box)
         self.cable_preset = QComboBox()
-        self.cable_preset.addItems(["Custom", "DX7 60 MHz Existing Cable"])
+        self.cable_preset.addItems(["DX7 Existing Cable", "COMCRAFT AA-11459", "Custom"])
         self.cable_preset.currentTextChanged.connect(self._on_cable_preset_changed)
-        self.spec_model = _line_edit("Unknown / Input Required", "Cable model name.")
-        self.spec_part = _line_edit("Unknown / Input Required", "Cable part number.")
+        self.spec_family = _text_line_edit("Unknown / Input Required", "Cable family.")
+        self.spec_model = _text_line_edit("Unknown / Input Required", "Cable model / assembly designation.")
+        self.spec_part = _text_line_edit("Unknown / Input Required", "ASM part number.")
+        self.spec_assembly = _text_line_edit("Unknown / Input Required", "Assembly designation.")
+        self.spec_outer_d = _text_line_edit("Unknown / Input Required", "Cable outer diameter [mm].")
+        self.spec_center_d = _text_line_edit("Unknown / Input Required", "Center conductor diameter [mm].")
+        self.spec_dielectric_d = _text_line_edit("Unknown / Input Required", "Dielectric diameter [mm].")
+        self.spec_center_type = _text_line_edit("Unknown / Input Required", "Center conductor construction.")
+        self.spec_dielectric = _text_line_edit("Unknown / Input Required", "Dielectric material.")
+        self.spec_outer_shield = _text_line_edit("Unknown / Input Required", "Outer shield construction.")
+        self.spec_jacket = _text_line_edit("Unknown / Input Required", "Jacket material.")
+        self.spec_temp_range = _text_line_edit("Unknown / Input Required", "Cable published temperature range.")
+        self.spec_bend_radius = _text_line_edit("Unknown / Input Required", "Minimum bend radius [mm].")
+        self.spec_d_inner = _text_line_edit(
+            "UNKNOWN / INPUT REQUIRED",
+            "D for coax equation is inner diameter of outer conductor; do not fabricate from overall dimensions.",
+        )
         self.spec_status = QLabel("Status: USER INPUT")
+        self.spec_field_status = QLabel("Field status: USER INPUT")
+        self.spec_field_status.setWordWrap(True)
+        self.spec_field_status.setStyleSheet("color: #a5f3fc;")
+        self.power_rating_panel = QLabel("")
+        self.power_rating_panel.setWordWrap(True)
+        self.power_rating_panel.setStyleSheet("color: #c4b5fd;")
+        self.power_rating_panel.setToolTip(
+            "Equivalent Matched-Line RMS Current is a calculated engineering reference and is not a manufacturer-specified maximum RF current."
+        )
         s.addRow("Preset", self.cable_preset)
+        s.addRow("Cable Family", self.spec_family)
         s.addRow("Model", self.spec_model)
-        s.addRow("Part Number", self.spec_part)
+        s.addRow("ASM Part Number", self.spec_part)
+        s.addRow("Assembly", self.spec_assembly)
+        s.addRow("Outer Diameter [mm]", self.spec_outer_d)
+        s.addRow("Center Conductor Diameter [mm]", self.spec_center_d)
+        s.addRow("Dielectric Diameter [mm]", self.spec_dielectric_d)
+        s.addRow("Center Conductor", self.spec_center_type)
+        s.addRow("Dielectric", self.spec_dielectric)
+        s.addRow("Outer Shield", self.spec_outer_shield)
+        s.addRow("Jacket", self.spec_jacket)
+        s.addRow("Cable Published Temperature Range", self.spec_temp_range)
+        s.addRow("Minimum Bend Radius [mm]", self.spec_bend_radius)
+        s.addRow("Outer-Conductor Inner Diameter D [mm]", self.spec_d_inner)
         s.addRow(self.spec_status)
+        s.addRow(self.spec_field_status)
+        s.addRow("AA-11459 Power Rating", self.power_rating_panel)
 
-        cards = QGroupBox("Power & Stress Summary")
+        cards = QGroupBox("Power Flow")
         cg = QGridLayout(cards)
         self.card_labels: dict[str, QLabel] = {}
         for idx, (title, target, color) in enumerate(
             [
+                ("MATCH INPUT POWER", "match_input", "#3b82f6"),
+                ("MATCH LOSS", "match_loss", "#f59e0b"),
                 ("MATCH OUTPUT POWER", "match_output", "#22d3ee"),
-                ("CABLE DISSIPATION", "cable_loss", "#f97316"),
-                ("CABLE END DELIVERED", "chamber", "#22c55e"),
-                ("MAX VOLTAGE", "vmax", "#22d3ee"),
-                ("MAX CURRENT", "imax", "#fb923c"),
-                ("MAX LOCAL HEATING", "wmax", "#ef4444"),
+                ("CABLE DISSIPATION", "cable_loss", "#ef4444"),
+                ("CABLE END DELIVERED POWER", "chamber", "#22c55e"),
             ]
         ):
             t = QLabel(f"{title}\n-")
             t.setStyleSheet(f"color:{color}; border:1px solid #334155; border-radius:8px; padding:10px;")
             self.card_labels[target] = t
-            cg.addWidget(t, idx // 3, idx % 3)
+            cg.addWidget(t, idx // 3, idx % 3, 1, 1)
+
+        self.efficiency_label = QLabel("Matcher Efficiency: -\nCable Efficiency: -\nOverall Delivery Efficiency: -")
+        self.efficiency_label.setStyleSheet("color:#93c5fd;")
+        cg.addWidget(self.efficiency_label, 2, 0, 1, 3)
+
+        self.stress_metrics_label = QLabel("Run analysis to view max voltage/current/local dissipation.")
+        self.stress_metrics_label.setStyleSheet("color:#cbd5e1;")
+        cg.addWidget(self.stress_metrics_label, 3, 0, 1, 3)
+        self.current_comparison_label = QLabel(
+            "Matched-Line Current: - Arms\n"
+            "Simulated Maximum: - Arms\n"
+            "Current Enhancement: - x"
+        )
+        self.current_comparison_label.setStyleSheet("color:#e9d5ff;")
+        cg.addWidget(self.current_comparison_label, 4, 0, 1, 3)
 
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
@@ -269,6 +370,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_row, 3, 0, 1, 2)
         layout.addWidget(self.live_metrics_label, 4, 0, 1, 2)
         self._toggle_rlgc_fields()
+        self.cable_preset.setCurrentText("DX7 Existing Cable")
 
     @staticmethod
     def _pair_widget(left: QWidget, right: QWidget) -> QWidget:
@@ -403,22 +505,153 @@ class MainWindow(QMainWindow):
             w.setEnabled(use_rlgc)
         self.att.setEnabled(not use_rlgc)
         self.att_unit.setEnabled(not use_rlgc)
+        self.att_mode.setEnabled(not use_rlgc)
 
     def _toggle_chamber_fields(self) -> None:
         direct = self.chamber_mode.currentText() != ChamberImpedanceMode.DERIVED_FROM_MATCH.value
         self.zl_r.setEnabled(direct)
         self.zl_x.setEnabled(direct)
 
+    @staticmethod
+    def _as_float_or_none(text: str) -> float | None:
+        value = text.strip()
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    def _active_frequency_mhz(self) -> float:
+        try:
+            f_mhz = float(self.freq_mhz.text())
+        except ValueError:
+            return 60.0
+        return f_mhz if f_mhz > 0 else 60.0
+
+    def _update_power_rating_panel(self) -> None:
+        lines = ["Manufacturer specification points:"]
+        for freq_mhz, p_kw in AA11459_POWER_RATING_KW:
+            i_eq = math.sqrt(p_kw * 1000.0 / 50.0)
+            lines.append(f"{freq_mhz:g} MHz    {p_kw:.2f} kW")
+            lines.append(
+                f"  Equivalent Matched-Line RMS Current = {i_eq:.2f} Arms "
+                f"[CALCULATED ENGINEERING REFERENCE]"
+            )
+        self.power_rating_panel.setText("\n".join(lines))
+
+    def _sync_attenuation_from_mode(self) -> None:
+        if self.cable_preset.currentText() != "COMCRAFT AA-11459":
+            if self.att_mode.currentText() == "MANUAL ENTRY":
+                self.att_info.setText("Attenuation source status: USER INPUT")
+            return
+
+        mode = self.att_mode.currentText()
+        if mode == "MANUFACTURER TABLE ONLY":
+            self.att.setText("")
+            self.att_info.setText(
+                "60 MHz Attenuation: Not directly specified in current datasheet points.\n"
+                "Status: MANUFACTURER SPEC"
+            )
+            return
+
+        if mode == "INTERPOLATE BETWEEN PUBLISHED POINTS":
+            target_f = self._active_frequency_mhz()
+            try:
+                interp = interpolate_log_frequency(AA11459_ATTENUATION_DB_PER_100FT, target_f)
+                self.att.setText(f"{interp.value:.6g}")
+                self.att_info.setText(
+                    f"{target_f:.3f} MHz Attenuation: {interp.value:.6g} dB/100ft [INTERPOLATED VALUE]\n"
+                    f"Source points: {interp.lower_point[0]:g} MHz ({interp.lower_point[1]:.2f} dB/100ft) "
+                    f"and {interp.upper_point[0]:g} MHz ({interp.upper_point[1]:.2f} dB/100ft)\n"
+                    "Status: INTERPOLATED"
+                )
+            except ValueError as exc:
+                self.att_info.setText(f"Interpolation unavailable: {exc}")
+            return
+
+        self.att_info.setText("Attenuation source status: USER INPUT")
+
+    def _on_attenuation_mode_changed(self, _text: str) -> None:
+        self._sync_attenuation_from_mode()
+        self.recalculate()
+
     def _on_cable_preset_changed(self, text: str) -> None:
-        if text == "DX7 60 MHz Existing Cable":
+        if text == "DX7 Existing Cable":
             self.length.setText("1.03")
             self.z0.setText("50")
+            self.vf.setText("0.76")
             self.att.setText("0.6")
-            self.spec_model.setText("AA11459-LCMR-158M-01.03M")
+            self.spec_family.setText("AA-11459")
+            self.spec_model.setText("AA11459-LCMR/LMCR-158M-01.03M")
             self.spec_part.setText("1238-727-01")
-            self.spec_status.setText("Status: DATASHEET/HISTORICAL")
+            self.spec_assembly.setText("AA11459-LCMR/LMCR-158M-01.03M")
+            self.spec_outer_d.setText("21.46")
+            self.spec_center_d.setText("5.97")
+            self.spec_dielectric_d.setText("17.27")
+            self.spec_center_type.setText("Stranded")
+            self.spec_dielectric.setText("Taped PTFE")
+            self.spec_outer_shield.setText("Double Braid")
+            self.spec_jacket.setText("PUR")
+            self.spec_temp_range.setText("-55 C to +105 C")
+            self.spec_bend_radius.setText("107.95")
+            self.spec_d_inner.setText("UNKNOWN / INPUT REQUIRED")
+            self.att_mode.setCurrentText("MANUAL ENTRY")
+            self.spec_status.setText("Status: INTERNAL ASSEMBLY DATA + MANUFACTURER SPEC")
+            self.spec_field_status.setText(
+                "Cable Family: MANUFACTURER SPEC | Velocity Factor: MANUFACTURER SPEC\n"
+                "ASM P/N: INTERNAL ASSEMBLY DATA | Assembly Length: INTERNAL ASSEMBLY DATA\n"
+                "Outer-Conductor Inner Diameter D: UNKNOWN / INPUT REQUIRED"
+            )
+            self._update_power_rating_panel()
+        elif text == "COMCRAFT AA-11459":
+            self.length.setText("1.03")
+            self.z0.setText("50")
+            self.vf.setText("0.76")
+            self.spec_family.setText("AA-11459")
+            self.spec_model.setText("AA-11459")
+            self.spec_part.setText("1238-727-01")
+            self.spec_assembly.setText("AA11459-LCMR/LMCR-158M-01.03M")
+            self.spec_outer_d.setText("21.46")
+            self.spec_center_d.setText("5.97")
+            self.spec_dielectric_d.setText("17.27")
+            self.spec_center_type.setText("Stranded")
+            self.spec_dielectric.setText("Taped PTFE")
+            self.spec_outer_shield.setText("Double Braid")
+            self.spec_jacket.setText("PUR")
+            self.spec_temp_range.setText("-55 C to +105 C")
+            self.spec_bend_radius.setText("107.95")
+            self.spec_d_inner.setText("UNKNOWN / INPUT REQUIRED")
+            self.att_mode.setCurrentText("INTERPOLATE BETWEEN PUBLISHED POINTS")
+            self.spec_status.setText("Status: MANUFACTURER SPEC + INTERNAL ASSEMBLY DATA")
+            self.spec_field_status.setText(
+                "Cable Family: MANUFACTURER SPEC | Velocity Factor: MANUFACTURER SPEC\n"
+                "ASM P/N: INTERNAL ASSEMBLY DATA | Assembly Length: INTERNAL ASSEMBLY DATA\n"
+                "60 MHz Attenuation: INTERPOLATED (when interpolation mode is selected)\n"
+                "Outer-Conductor Inner Diameter D: UNKNOWN / INPUT REQUIRED"
+            )
+            self._update_power_rating_panel()
         else:
             self.spec_status.setText("Status: USER INPUT")
+            self.spec_family.setText("Unknown / Input Required")
+            self.spec_model.setText("Unknown / Input Required")
+            self.spec_part.setText("Unknown / Input Required")
+            self.spec_assembly.setText("Unknown / Input Required")
+            self.spec_outer_d.setText("Unknown / Input Required")
+            self.spec_center_d.setText("Unknown / Input Required")
+            self.spec_dielectric_d.setText("Unknown / Input Required")
+            self.spec_center_type.setText("Unknown / Input Required")
+            self.spec_dielectric.setText("Unknown / Input Required")
+            self.spec_outer_shield.setText("Unknown / Input Required")
+            self.spec_jacket.setText("Unknown / Input Required")
+            self.spec_temp_range.setText("Unknown / Input Required")
+            self.spec_bend_radius.setText("Unknown / Input Required")
+            self.spec_d_inner.setText("UNKNOWN / INPUT REQUIRED")
+            self.spec_field_status.setText("Field status: USER INPUT")
+            self.power_rating_panel.setText("")
+            if self.att_mode.currentText() != "MANUAL ENTRY":
+                self.att_mode.setCurrentText("MANUAL ENTRY")
+        self._sync_attenuation_from_mode()
         self.recalculate()
 
     def _on_matcher_mode_changed(self, text: str) -> None:
@@ -428,8 +661,7 @@ class MainWindow(QMainWindow):
     def _on_operating_point_changed(self, text: str) -> None:
         if "W" in text:
             selected_power_w = float(text.replace("W", "").strip())
-            self.p_gen_w.setText(f"{selected_power_w:g}")
-            self.p_match_out.setText(f"{selected_power_w:g}")
+            self.p_match_in_w.setText(f"{selected_power_w:g}")
             p = find_operating_point(selected_power_w)
             if p is not None:
                 self.zm_r.setText(str(p.zreal_ohm))
@@ -445,11 +677,12 @@ class MainWindow(QMainWindow):
         self.recalculate()
 
     def _collect_models(self) -> tuple[SystemParameters, CableParameters, ChamberParameters]:
+        self._sync_attenuation_from_mode()
         source = MatchOutputPowerSource(self.power_source.currentText())
         matcher_mode = MatcherModelMode(self.matcher_mode.currentText())
         system = SystemParameters(
             frequency_mhz=float(self.freq_mhz.text()),
-            generator_power_w=float(self.p_gen_w.text()),
+            match_input_power_w=float(self.p_match_in_w.text()),
             generator_impedance_ohm=float(self.z_gen.text()),
             match_efficiency_percent=float(self.match_eff.text()),
             match_output_power_source=source,
@@ -479,8 +712,22 @@ class MainWindow(QMainWindow):
             c_per_m=float(self.cp.text()) if self.cp.text().strip() else None,
             specification=CableSpecification(
                 preset_name=self.cable_preset.currentText(),
+                cable_family=self.spec_family.text(),
                 cable_model=self.spec_model.text(),
                 part_number=self.spec_part.text(),
+                assembly_designation=self.spec_assembly.text(),
+                assembly_length_m=self._as_float_or_none(self.length.text()),
+                outer_diameter_mm=self._as_float_or_none(self.spec_outer_d.text()),
+                center_conductor_diameter_mm=self._as_float_or_none(self.spec_center_d.text()),
+                dielectric_diameter_mm=self._as_float_or_none(self.spec_dielectric_d.text()),
+                center_conductor_type=self.spec_center_type.text(),
+                dielectric_material=self.spec_dielectric.text(),
+                outer_shield=self.spec_outer_shield.text(),
+                jacket=self.spec_jacket.text(),
+                temperature_range_c=self.spec_temp_range.text(),
+                min_bend_radius_mm=self._as_float_or_none(self.spec_bend_radius.text()),
+                outer_conductor_inner_d_mm=self._as_float_or_none(self.spec_d_inner.text()),
+                attenuation_status=self.att_info.text(),
                 source_status=self.spec_status.text().replace("Status: ", ""),
             ),
         )
@@ -504,8 +751,13 @@ class MainWindow(QMainWindow):
             result = analyze_cable(system, cable, chamber)
             self.last_result = result
             self.system_diag.setText(self._format_consistency_diagnostic(system))
+            if system.match_output_power_source == MatchOutputPowerSource.USER and result.match_input_power_w > 0:
+                derived_eff = 100.0 * result.match_output_power_w / result.match_input_power_w
+                self.match_eff.setText(f"{derived_eff:.6g}")
             self._update_cards(result, system)
             all_warnings = valid.warnings + result.warnings
+            if "IDEAL MATCHER - NO MATCH LOSS ASSUMED" in result.match_output_power_source_label:
+                all_warnings.append("IDEAL MATCHER - NO MATCH LOSS ASSUMED")
             if system.sparam_frequency_mhz is not None and abs(system.sparam_frequency_mhz - system.frequency_mhz) > 0.5:
                 all_warnings.append("S-parameter frequency differs from simulation frequency.")
             self.warning_label.setText("\n".join(all_warnings))
@@ -524,23 +776,46 @@ class MainWindow(QMainWindow):
         zmag = abs(z)
         vrms = system.measured_vpp_v / (2.0 * np.sqrt(2.0))
         icalc = vrms / zmag if zmag else np.nan
-        pcalc = (vrms**2 * z.real / (zmag**2)) if zmag else np.nan
         return (
             "Reference-plane / measurement consistency check\n"
             f"Zmag={zmag:.4f} ohm, Zphase={np.degrees(np.angle(z)):.2f} deg, "
-            f"Vrms(Vpp)={vrms:.2f} V, Icalc={icalc:.2f} A, Pcalc={pcalc:.2f} W"
+            f"Vrms(Vpp)={vrms:.2f} V, Icalc={icalc:.2f} A\n"
+            "Do not infer Match Input Power directly from Match Output V/I without a matcher model."
         )
 
     def _update_cards(self, r: CableAnalysisResult, system: SystemParameters) -> None:
         vmax_idx = int(np.argmax(np.abs(r.v_rms)))
         imax_idx = int(np.argmax(np.abs(r.i_rms)))
         wmax_idx = int(np.argmax(r.p_total_loss_w_per_m))
+        eta_match = (r.match_output_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
+        eta_cable = (r.chamber_power_w / r.match_output_power_w * 100.0) if r.match_output_power_w > 0 else 0.0
+        eta_total = (r.chamber_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
+        self.card_labels["match_input"].setText(f"MATCH INPUT POWER\n{r.match_input_power_w:.2f} W")
+        self.card_labels["match_loss"].setText(f"MATCH LOSS\n{r.match_loss_w:.2f} W")
         self.card_labels["match_output"].setText(f"MATCH OUTPUT POWER\n{r.match_output_power_w:.2f} W")
         self.card_labels["cable_loss"].setText(f"CABLE DISSIPATION\n{r.cable_loss_w:.2f} W ({r.cable_loss_percent:.2f}%)")
-        self.card_labels["chamber"].setText(f"CABLE END DELIVERED\n{r.chamber_power_w:.2f} W")
-        self.card_labels["vmax"].setText(f"MAX VOLTAGE\n{np.abs(r.v_rms[vmax_idx]):.2f} Vrms @ {r.z_m[vmax_idx]:.3f} m")
-        self.card_labels["imax"].setText(f"MAX CURRENT\n{np.abs(r.i_rms[imax_idx]):.2f} Arms @ {r.z_m[imax_idx]:.3f} m")
-        self.card_labels["wmax"].setText(f"MAX LOCAL HEATING\n{r.p_total_loss_w_per_m[wmax_idx]:.3f} W/m @ {r.z_m[wmax_idx]:.3f} m")
+        self.card_labels["chamber"].setText(f"CABLE END DELIVERED POWER\n{r.chamber_power_w:.2f} W")
+        self.efficiency_label.setText(
+            f"Matcher Efficiency [%]: {eta_match:.2f}\n"
+            f"Cable Efficiency [%]: {eta_cable:.2f}\n"
+            f"Overall Delivery Efficiency [%]: {eta_total:.2f}"
+        )
+        self.stress_metrics_label.setText(
+            f"MAX VOLTAGE: {np.abs(r.v_rms[vmax_idx]):.2f} Vrms @ {r.z_m[vmax_idx]:.3f} m   |   "
+            f"MAX CURRENT: {np.abs(r.i_rms[imax_idx]):.2f} Arms @ {r.z_m[imax_idx]:.3f} m   |   "
+            f"MAX LOCAL DISSIPATION: {r.p_total_loss_w_per_m[wmax_idx]:.3f} W/m @ {r.z_m[wmax_idx]:.3f} m"
+        )
+        z0_ohm = self._as_float_or_none(self.z0.text())
+        i_matched = 0.0
+        if z0_ohm is not None and z0_ohm > 0 and r.match_output_power_w >= 0:
+            i_matched = math.sqrt(r.match_output_power_w / z0_ohm)
+        i_sim_max = float(np.abs(r.i_rms[imax_idx]))
+        k_i = (i_sim_max / i_matched) if i_matched > 0 else float("nan")
+        self.current_comparison_label.setText(
+            f"SIMULATED MAXIMUM CURRENT\n{i_sim_max:.2f} Arms @ {r.z_m[imax_idx]:.3f} m\n"
+            f"MATCHED-LINE CURRENT AT MATCH OUTPUT POWER\n{i_matched:.2f} Arms [DERIVED]\n"
+            f"Current Enhancement: {k_i:.2f} x"
+        )
         self.live_metrics_label.setText(self._format_live_metrics(r, system))
 
     def _format_live_metrics(self, r: CableAnalysisResult | None, system: SystemParameters | None) -> str:
@@ -808,13 +1083,17 @@ class MainWindow(QMainWindow):
                 )
 
     def _update_summary(self, r: CableAnalysisResult, system: SystemParameters) -> None:
-        eta_match = (r.match_output_power_w / r.generator_power_w * 100.0) if r.generator_power_w > 0 else 0.0
+        eta_match = (r.match_output_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
         eta_cable = (r.chamber_power_w / r.match_output_power_w * 100.0) if r.match_output_power_w > 0 else 0.0
-        eta_total = (r.chamber_power_w / r.generator_power_w * 100.0) if r.generator_power_w > 0 else 0.0
+        eta_total = (r.chamber_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
+        ideal_note = ""
+        if "IDEAL MATCHER" in r.match_output_power_source_label:
+            ideal_note = "IDEAL MATCHER - NO MATCH LOSS ASSUMED\n\n"
         self.summary_label.setText(
             f"Reference planes:\n"
-            f"Generator -> Matcher -> Match Output/Cable Input (z=0) -> Chamber (z=L)\n\n"
-            f"Generator Power = {r.generator_power_w:.3f} W\n"
+            f"Match Input -> Matcher -> Match Output/Cable Input (z=0) -> Chamber (z=L)\n\n"
+            f"{ideal_note}"
+            f"Match Input Power = {r.match_input_power_w:.3f} W\n"
             f"Match Output Power = {r.match_output_power_w:.3f} W [{r.match_output_power_source_label}]\n"
             f"Match Loss = {r.match_loss_w:.3f} W\n"
             f"Cable Dissipation Power = {r.cable_loss_w:.3f} W\n"
