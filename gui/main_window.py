@@ -248,11 +248,14 @@ class MainWindow(QMainWindow):
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet("color:#f87171;")
+        self.live_metrics_label = QLabel("Current VSWR: -    Current Cable Loss: -")
+        self.live_metrics_label.setStyleSheet("color:#93c5fd;")
 
         layout.addWidget(cable_box, 0, 0)
         layout.addWidget(spec_box, 1, 0)
         layout.addWidget(cards, 0, 1, 2, 1)
         layout.addWidget(self.warning_label, 2, 0, 1, 2)
+        layout.addWidget(self.live_metrics_label, 3, 0, 1, 2)
         self._toggle_rlgc_fields()
 
     @staticmethod
@@ -469,6 +472,7 @@ class MainWindow(QMainWindow):
             if not valid.valid:
                 self.system_diag.setText("Input Required:\n" + "\n".join(valid.errors))
                 self.last_result = None
+                self.live_metrics_label.setText("Current VSWR: -    Current Cable Loss: -")
                 return
             result = analyze_cable(system, cable, chamber)
             self.last_result = result
@@ -484,6 +488,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.last_result = None
             self.system_diag.setText(f"Input Required / Error: {exc}")
+            self.live_metrics_label.setText("Current VSWR: -    Current Cable Loss: -")
 
     def _format_consistency_diagnostic(self, system: SystemParameters) -> str:
         if system.measured_vpp_v is None:
@@ -509,6 +514,9 @@ class MainWindow(QMainWindow):
         self.card_labels["vmax"].setText(f"MAX VOLTAGE\n{np.abs(r.v_rms[vmax_idx]):.2f} Vrms @ {r.z_m[vmax_idx]:.3f} m")
         self.card_labels["imax"].setText(f"MAX CURRENT\n{np.abs(r.i_rms[imax_idx]):.2f} Arms @ {r.z_m[imax_idx]:.3f} m")
         self.card_labels["wmax"].setText(f"MAX LOCAL HEATING\n{r.p_total_loss_w_per_m[wmax_idx]:.3f} W/m @ {r.z_m[wmax_idx]:.3f} m")
+        self.live_metrics_label.setText(
+            f"Current VSWR: {r.vswr:.3f}    Current Cable Loss: {r.cable_loss_percent:.2f}% ({r.cable_loss_w:.2f} W)"
+        )
 
     def _draw_distribution(self) -> None:
         if self.last_result is None:
@@ -666,13 +674,13 @@ class MainWindow(QMainWindow):
 
     def calculate_coax(self) -> None:
         try:
-            mode = self.coax_mode.currentText()
+            mode = self.coax_mode.currentText().strip().lower()
             er = float(self.coax_er.text())
-            if "Mode 2" in mode:
+            if mode.startswith("mode 2"):
                 z0 = z0_from_geometry(float(self.coax_D.text()), float(self.coax_d.text()), er)
                 self.coax_result.setText(f"Ideal TEM Coax Approximation: Z0 = {z0:.4f} ohm")
                 self.z0.setText(f"{z0:.6g}")
-            elif "Mode 3" in mode:
+            elif mode.startswith("mode 3"):
                 d_req = inner_diameter_for_target_z0(float(self.coax_target_z0.text()), float(self.coax_D.text()), er)
                 self.coax_result.setText(f"Ideal TEM Coax Approximation: required d = {d_req:.4f} mm")
                 self.coax_d.setText(f"{d_req:.6g}")

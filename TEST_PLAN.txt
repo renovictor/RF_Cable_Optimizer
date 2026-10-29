@@ -1,0 +1,163 @@
+RF Cable Optimizer - Test Plan (V2026.10.1)
+
+1) Environment Setup
+- OS: Windows
+- Python: 3.11+ recommended
+- From project root:
+  1. pip install -r requirements.txt
+  2. python -m unittest discover -s tests -v
+  3. python main.py
+
+Expected:
+- Unit tests pass.
+- GUI launches without crash.
+
+2) Automated Test Verification
+- Run:
+  python -m unittest discover -s tests -v
+- Confirm these categories pass:
+  - Transmission-line math
+  - Power-balance checks
+  - Attenuation unit conversion
+  - Coax geometry equations
+  - Two-port network basic behavior
+
+3) GUI Smoke Test
+- Open app:
+  python main.py
+- Verify tabs exist:
+  - System Input
+  - Cable Analysis
+  - Voltage / Current Distribution
+  - Z0 Optimization
+  - Coax Geometry
+  - Engineering Summary
+- Verify title includes version string:
+  V2026.10.1
+
+4) Reference Plane / Input Behavior
+- In System Input tab:
+  - Set chamber mode = DERIVED FROM MATCH OUTPUT IMPEDANCE
+  - Keep default match output impedance (3 + j19 ohm)
+  - Click Run Analysis
+- Confirm summary text explicitly shows reference-plane chain:
+  Generator -> Matcher -> Match Output/Cable Input (z=0) -> Chamber (z=L)
+- Note:
+  - Warnings such as "High VSWR threshold exceeded" or "High RMS voltage threshold exceeded"
+    can be expected in this step because it may represent a strongly mismatched operating condition.
+  - This step is for reference-plane correctness, not a low-stress operating point.
+- Optional clean-pass variant (reduced warnings):
+  - Set chamber mode = USER-ENTERED CHAMBER IMPEDANCE
+  - Set chamber impedance to approximately 50 + j0 ohm
+  - Keep Z0 = 50 ohm
+  - Re-run analysis and verify warnings are reduced/cleared.
+
+5) Datasheet Mode Validation
+- In Cable Analysis tab:
+  - Cable Model = Datasheet Attenuation
+  - Z0 = 50
+  - Length = 1.03
+  - Velocity Factor = 0.76
+  - Attenuation = 0.6, unit = dB/100ft
+- Run Analysis
+- Confirm:
+  - VSWR / Return Loss values are shown
+  - Power cards update:
+    Match Output Power, Cable Dissipation, Cable End Delivered
+  - Warning text includes:
+    "Conductor/dielectric loss split is not modeled in datasheet mode."
+
+6) RLGC Mode Validation
+- Set Cable Model = Full RLGC
+- Enter sample RLGC values (example):
+  - R' = 0.08 ohm/m
+  - L' = 2.5e-7 H/m
+  - G' = 1.0e-4 S/m
+  - C' = 1.0e-10 F/m
+- Run Analysis
+- Confirm:
+  - Analysis completes without error
+  - Local dissipation plot is non-zero
+  - Probe table shows non-zero conductor/dielectric columns
+
+7) Chamber Mode Checks
+- Mode A: USER-ENTERED CHAMBER IMPEDANCE
+  - Enter Chamber R/X (example 2 + j15)
+  - Run Analysis and confirm results update.
+- Mode B: DERIVED FROM MATCH OUTPUT IMPEDANCE
+  - Clear chamber inputs
+  - Run Analysis and confirm no chamber-input requirement error.
+- Mode C: MEASURED CHAMBER IMPEDANCE
+  - Enter Chamber R/X and run.
+
+8) Operating Point Selector (DX7)
+- In Operating Point dropdown, select:
+  - 1300 W, then 1200 W, then 100 W
+- Confirm fields auto-populate each time:
+  - Generator Power
+  - Match Output R/X
+  - Measured Vpp
+  - Load/Tune labels
+  - "Measured Iout - Untrusted" label
+
+9) Distribution + Probe Interaction
+- Go to Voltage / Current Distribution tab.
+- Move slider from 0 to max and back.
+- Confirm immediate updates of:
+  - Probe readout (Vrms, Irms, P, local W/m, cumulative W)
+  - Vertical probe marker on plots
+- In measurement positions input:
+  - Use: 0.05,0.10,0.15,0.20,0.50,1.00
+- Confirm table populates valid positions only.
+
+10) Historical Region Overlay
+- Confirm shaded historical band appears around:
+  0.10 m to 0.20 m
+- Ensure this is visual-only (it should not force peak positions).
+
+11) Z0 Optimization Sweep
+- Go to Z0 Optimization tab.
+- Use:
+  - Z0 min = 10
+  - Z0 max = 60
+  - step = 1
+  - weights = 1,1,1
+- Run sweep.
+- Confirm plots render:
+  - Z0 vs Cable Loss
+  - Z0 vs Max Voltage
+  - Z0 vs Max Current
+  - Z0 vs Chamber Power
+
+12) Coax Geometry Modes
+- Mode 2 (Calculate Z0 from Geometry):
+  - Example D=20 mm, d=5 mm, er=2.1
+  - Calculate and confirm Z0 result shown.
+- Mode 3 (Design Geometry for Target Z0):
+  - Example target Z0=30, D=20, er=2.1
+  - Calculate and confirm required d is shown and updated.
+- Confirm cable Z0 field updates after geometry calculations.
+
+13) CSV Export
+- Profile export:
+  - Run analysis, click "Export Profile CSV"
+  - Confirm file contains:
+    inputs + z, V(z), I(z), P(z), conductor/dielectric/total loss density, cumulative loss
+- Sweep export:
+  - Run sweep, click "Export Sweep CSV"
+  - Confirm file contains:
+    Z0, loss W/%, max V, max I, VSWR, chamber power, score
+
+14) Negative / Validation Checks
+- Set invalid values and verify graceful handling:
+  - Frequency <= 0
+  - Z0 <= 0
+  - Cable length blank or <= 0
+  - Velocity factor > 1
+- Confirm "Input Required" / error diagnostics shown instead of crash.
+
+15) Release Regression Checklist
+- Version in window title = V2026.10.1
+- CHANGELOG.md includes V2026.10.1 entry
+- All unit tests pass
+- GUI starts and core workflows run end-to-end
