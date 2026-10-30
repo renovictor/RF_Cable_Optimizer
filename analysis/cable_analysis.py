@@ -8,6 +8,7 @@ from models.cable_parameters import CableModelMode, CableParameters
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
 from models.system_parameters import MatchOutputPowerSource, MatcherModelMode, SystemParameters
 from rf.power import cumulative_trapezoid, real_power_from_phasors
+from rf.smith_math import gamma_from_impedance, impedance_from_vi, normalized_impedance
 from rf.transmission_line import (
     deembed_load_impedance,
     electrical_length_deg,
@@ -35,8 +36,18 @@ class CableAnalysisResult:
     p_diel_w_per_m: np.ndarray
     p_total_loss_w_per_m: np.ndarray
     p_cumulative_loss_w: np.ndarray
+    z0_reference: complex
+    z_local_ohm: np.ndarray
+    z_normalized: np.ndarray
+    gamma_local: np.ndarray
     z_load: complex
     z_in: complex
+    z_from_vi_match: complex
+    z_from_vi_end: complex
+    endpoint_match_delta_ohm: complex
+    endpoint_end_delta_ohm: complex
+    endpoint_match_rel_error: float
+    endpoint_end_rel_error: float
     gamma_l: complex
     gamma_phase_deg: float
     vswr: float
@@ -128,6 +139,9 @@ def analyze_cable(
     z_m = np.linspace(0.0, line_length, points)
     v_rms, i_rms = solve_distributed_vi(z_m, line_length, z0, gamma, z_load, v0)
     p_real_w = real_power_from_phasors(v_rms, i_rms)
+    z_local_ohm = impedance_from_vi(v_rms, i_rms)
+    z_normalized = normalized_impedance(z_local_ohm, z0)
+    gamma_local = gamma_from_impedance(z_local_ohm, z0)
 
     if cable.model_mode == CableModelMode.RLGC:
         p_cond_w_per_m = cable.r_per_m * np.abs(i_rms) ** 2  # type: ignore[operator]
@@ -147,6 +161,15 @@ def analyze_cable(
     p_balance_err_pct = (p_balance_err / p_match_input * 100.0) if p_match_input > 0 else 0.0
 
     gl = reflection_coefficient(z_load, z0)
+    z_from_vi_match = complex(z_local_ohm[0])
+    z_from_vi_end = complex(z_local_ohm[-1])
+    endpoint_match_delta = z_from_vi_match - z_match_measured
+    endpoint_end_delta = z_from_vi_end - z_load
+    endpoint_match_rel_error = (
+        abs(endpoint_match_delta) / abs(z_match_measured) if abs(z_match_measured) > 0 else float("inf")
+    )
+    endpoint_end_rel_error = abs(endpoint_end_delta) / abs(z_load) if abs(z_load) > 0 else float("inf")
+
     warnings: list[str] = []
     if vswr(gl) > system.thresholds.vswr:
         warnings.append("High VSWR threshold exceeded.")
@@ -160,6 +183,17 @@ def analyze_cable(
         warnings.append("Power-balance error threshold exceeded.")
     if cable.model_mode == CableModelMode.DATASHEET:
         warnings.append("Conductor/dielectric loss split is not modeled in datasheet mode.")
+    endpoint_warning_threshold = 1e-4
+    if endpoint_match_rel_error > endpoint_warning_threshold:
+        warnings.append(
+            f"Endpoint mismatch at z=0 exceeds threshold: rel err={endpoint_match_rel_error:.3e}, "
+            f"Delta_Z={endpoint_match_delta.real:+.4g}{endpoint_match_delta.imag:+.4g}j ohm."
+        )
+    if endpoint_end_rel_error > endpoint_warning_threshold:
+        warnings.append(
+            f"Endpoint mismatch at z=L exceeds threshold: rel err={endpoint_end_rel_error:.3e}, "
+            f"Delta_Z={endpoint_end_delta.real:+.4g}{endpoint_end_delta.imag:+.4g}j ohm."
+        )
 
     return CableAnalysisResult(
         z_m=z_m,
@@ -170,8 +204,18 @@ def analyze_cable(
         p_diel_w_per_m=p_diel_w_per_m,
         p_total_loss_w_per_m=p_total_loss_w_per_m,
         p_cumulative_loss_w=p_cumulative_loss_w,
+        z0_reference=z0,
+        z_local_ohm=z_local_ohm,
+        z_normalized=z_normalized,
+        gamma_local=gamma_local,
         z_load=z_load,
         z_in=z_in,
+        z_from_vi_match=z_from_vi_match,
+        z_from_vi_end=z_from_vi_end,
+        endpoint_match_delta_ohm=endpoint_match_delta,
+        endpoint_end_delta_ohm=endpoint_end_delta,
+        endpoint_match_rel_error=endpoint_match_rel_error,
+        endpoint_end_rel_error=endpoint_end_rel_error,
         gamma_l=gl,
         gamma_phase_deg=float(np.degrees(np.angle(gl))),
         vswr=vswr(gl),

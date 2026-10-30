@@ -47,33 +47,45 @@ HELP_HTML = """
 <p>Use <b>Probe Position [m]</b> to inspect Vrms, Vpp, Irms, Real Power, Local Dissipation, and Cumulative Loss at a specific location.</p>
 <p>The slider and numeric field represent the same cable position.</p>
 
-<h2>9. Measurement Positions</h2>
+<h2>9. Smith Chart</h2>
+<p>The Smith Chart shows complex impedance along the physical cable at the selected RF frequency (not a frequency sweep).</p>
+<p><b>z = 0</b> is Match Output / Cable Input and <b>z = L</b> is Cable End / Chamber Side.</p>
+<p>The colored trajectory is the impedance transformation from Match Output to Cable End; the yellow marker is the selected probe point.</p>
+<p>Probe movement inspects a different cable location only; it does not change the cable model.</p>
+<p>Changing Cable Length or cable/Z0 parameters recalculates the entire trajectory.</p>
+<p>Local impedance is derived from distributed phasors: <code>Z(z) = V(z) / I(z)</code>.</p>
+<p>The Smith normalization reference is the active cable Z0 (including complex Z0 in RLGC mode when applicable).</p>
+<p>When shown, the red segment is the historical damage-location range and is an independent comparison overlay.</p>
+<p>High current at one Smith point alone does not prove failure location; reflected power is not cable dissipation.</p>
+
+<h2>10. Measurement Positions</h2>
 <p>Enter comma-separated positions (example: <code>0.05,0.10,0.15,0.20,0.50,1.00</code>) to populate the measurement table.</p>
 
-<h2>10. Historical Damage Region</h2>
+<h2>11. Historical Damage Region</h2>
 <p>An optional shaded historical DX7 region may be displayed for reference only.</p>
 <p><b>The software does not force the simulated maximum into this region.</b></p>
 
-<h2>11. Z0 Optimization</h2>
+<h2>12. Z0 Optimization</h2>
 <p>Define Min Z0, Max Z0, and Z0 Step. The application compares cable loss, max voltage/current, and delivered power.</p>
 <p>The optimization score is a user-defined engineering tradeoff, not a physical law.</p>
 
-<h2>12. Coax Geometry</h2>
+<h2>13. Coax Geometry</h2>
 <p><b>D</b>: inner diameter of outer conductor, <b>d</b>: outer diameter of inner conductor, <b>epsilon_r</b>: relative dielectric constant.</p>
 <p><code>Z0 = (60 / sqrt(epsilon_r)) * ln(D/d)</code></p>
 <p>This is an ideal TEM coax approximation.</p>
 <p>Do not assume outer cable diameter or dielectric diameter is automatically equal to electrical <b>D</b>. If reliable D is unavailable, treat it as UNKNOWN / INPUT REQUIRED.</p>
 
-<h2>13. Datasheet Mode vs RLGC Mode</h2>
+<h2>14. Datasheet Mode vs RLGC Mode</h2>
 <p>Datasheet mode uses manufacturer attenuation and does not automatically decompose conductor/dielectric loss.</p>
 <p>RLGC mode uses R', L', G', C' and can estimate conductor and dielectric components.</p>
 <p><b>Cond=0 and Diel=0 in Datasheet mode means decomposition is unavailable, not zero real loss.</b></p>
 
-<h2>14. Important RF Physics Notes</h2>
+<h2>15. Important RF Physics Notes</h2>
 <p>Reflected Power is not Cable Dissipation. High VSWR does not automatically mean high cable dissipation. A lossless cable can have a standing wave with zero real cable loss.</p>
+<p>On a lossy cable, the Smith trajectory radius can change with position; do not force a constant-|Gamma| circle interpretation.</p>
 <p>Cable heating depends on conductor/dielectric/contact losses and thermal conditions.</p>
 
-<h2>15. Source Status</h2>
+<h2>16. Source Status</h2>
 <p>Interpret status tags carefully: MEASURED, DATASHEET, DERIVED, USER INPUT, ASSUMED/IDEAL, UNTRUSTED.</p>
 """
 

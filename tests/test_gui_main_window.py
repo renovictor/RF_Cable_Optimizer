@@ -128,7 +128,7 @@ class MainWindowGuiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertIn("INTERPOLATED", self.window.att_info.text())
 
-    def test_historical_damage_overlay_independent_of_preset(self) -> None:
+    def test_historical_damage_overlay_shows_only_when_metadata_exists(self) -> None:
         self.window.cable_preset.setCurrentText("DX7 Existing Cable")
         self.window.recalculate()
         self.app.processEvents()
@@ -140,7 +140,7 @@ class MainWindowGuiTests(unittest.TestCase):
         self.app.processEvents()
         axes_aa = self.window.dist_canvas.figure.axes
         aa_patch_count = sum(len(ax.patches) for ax in axes_aa)
-        self.assertEqual(dx7_patch_count, aa_patch_count)
+        self.assertGreater(dx7_patch_count, aa_patch_count)
 
     def test_match_output_power_reflects_matcher_efficiency(self) -> None:
         self.window.power_source.setCurrentText(MatchOutputPowerSource.CALCULATED.value)

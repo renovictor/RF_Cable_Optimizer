@@ -1,5 +1,12 @@
 # Changelog
 
+## V2026.10.4 - 2026-10-30
+
+- Added interactive Smith Chart integration on Cable Analysis using distributed V(z)/I(z)-derived impedance and Gamma arrays from the analysis engine.
+- Added reusable Smith math and Smith chart modules, including probe synchronization, historical-region overlay handling, measurement markers, and Smith image export.
+- Added Smith-related CSV profile columns, endpoint consistency diagnostics, and updated Help documentation.
+- Added Smith math/distributed/GUI test coverage.
+
 ## V2026.10.3 - 2026-10-30
 
 - Corrected power reference-plane terminology and calculations around Match Input / Match Output / Cable End Delivered power.

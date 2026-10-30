@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import csv
 import math
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QDoubleValidator, QKeySequence
+from PySide6.QtGui import QAction, QDoubleValidator, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QSlider,
     QTabWidget,
     QTableWidget,
@@ -32,6 +34,7 @@ from analysis.cable_analysis import CableAnalysisResult, analyze_cable
 from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
 from gui.help_window import HelpWindow
 from gui.plots import MplCanvas
+from gui.smith_chart import SmithChartCanvas
 from models.cable_presets import AA11459_ATTENUATION_DB_PER_100FT, AA11459_POWER_RATING_KW, interpolate_log_frequency
 from models.cable_parameters import AttenuationUnit, CableModelMode, CableParameters, CableSpecification
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
@@ -39,6 +42,7 @@ from models.operating_points import find_operating_point
 from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, MatcherModelMode, SystemParameters
 from models.validation import validate_inputs
 from rf.coax import inner_diameter_for_target_z0, z0_from_geometry
+from rf.smith_math import vswr_from_gamma
 from version import APP_VERSION
 
 
@@ -59,11 +63,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"RF Match-to-Chamber Cable Engineering Analyzer - {APP_VERSION}")
+        icon_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+        icon_path = icon_base / "smithchart.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1500, 980)
         self._apply_theme()
         self.last_result: CableAnalysisResult | None = None
         self.last_sweep: SweepResult | None = None
         self.help_window: HelpWindow | None = None
+        self._measurement_row_positions: list[float] = []
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -87,7 +96,7 @@ class MainWindow(QMainWindow):
         help_menu = menu.addMenu("Help")
 
         exit_action = QAction("Exit", self)
-        exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
         exit_action.setShortcutContext(Qt.ApplicationShortcut)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
@@ -149,7 +158,7 @@ class MainWindow(QMainWindow):
         self.p_match_in_w = _line_edit("1300", "Real RF power at matcher input reference plane [W].")
         self.z_gen = _line_edit("50", "Generator reference impedance [ohm].")
         self.p_match_out = _line_edit("1300", "Match Output real power at match-output reference plane [W].")
-        self.match_eff = _line_edit("100", "Match efficiency [%] when using calculated mode.")
+        self.match_eff = _line_edit("70", "Match efficiency [%] when using calculated mode.")
         self.power_source = QComboBox()
         self.power_source.addItems([s.value for s in MatchOutputPowerSource])
         self.zm_r = _line_edit("3", "Match Output impedance real part [ohm].")
@@ -225,7 +234,7 @@ class MainWindow(QMainWindow):
     def _build_cable_tab(self) -> None:
         tab = QWidget()
         self.tabs.addTab(tab, "Cable Analysis")
-        layout = QGridLayout(tab)
+        layout = QVBoxLayout(tab)
 
         cable_box = QGroupBox("Cable Parameters")
         f = QFormLayout(cable_box)
@@ -361,14 +370,62 @@ class MainWindow(QMainWindow):
         self.run_btn_cable = QPushButton("Run Analysis")
         self.run_btn_cable.clicked.connect(self.recalculate)
         action_row.addWidget(self.run_btn_cable)
+        self.export_smith_btn = QPushButton("Export Smith Chart Image")
+        self.export_smith_btn.clicked.connect(self.export_smith_chart_image)
+        action_row.addWidget(self.export_smith_btn)
         action_row.addStretch(1)
 
-        layout.addWidget(cable_box, 0, 0)
-        layout.addWidget(spec_box, 1, 0)
-        layout.addWidget(cards, 0, 1, 2, 1)
-        layout.addWidget(self.warning_label, 2, 0, 1, 2)
-        layout.addLayout(action_row, 3, 0, 1, 2)
-        layout.addWidget(self.live_metrics_label, 4, 0, 1, 2)
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.addWidget(cable_box)
+        left_layout.addWidget(spec_box)
+        left_layout.addWidget(cards)
+        left_layout.addWidget(self.warning_label)
+        left_layout.addLayout(action_row)
+        left_layout.addWidget(self.live_metrics_label)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        self.smith_canvas = SmithChartCanvas(width=7.0, height=7.0, dpi=100)
+        self.smith_canvas.probePositionSelected.connect(self._on_smith_probe_selected)
+        self.smith_canvas.set_hover_formatter(self._format_smith_hover)
+        right_layout.addWidget(self.smith_canvas, 4)
+
+        smith_cards = QGroupBox("Smith Chart Summary")
+        sg = QVBoxLayout(smith_cards)
+        self.smith_match_label = QLabel("MATCH OUTPUT IMPEDANCE\n-")
+        self.smith_probe_label = QLabel("PROBE IMPEDANCE\n-")
+        self.smith_end_label = QLabel("CABLE END IMPEDANCE\n-")
+        self.smith_ref_label = QLabel("SMITH REFERENCE\nZ0 = -")
+        self.smith_probe_gamma_label = QLabel("PROBE |GAMMA|\n-")
+        self.smith_note_label = QLabel("")
+        self.smith_note_label.setStyleSheet("color:#facc15;")
+        for widget in (
+            self.smith_match_label,
+            self.smith_probe_label,
+            self.smith_end_label,
+            self.smith_ref_label,
+            self.smith_probe_gamma_label,
+        ):
+            widget.setStyleSheet("border:1px solid #334155; border-radius:8px; padding:8px;")
+            sg.addWidget(widget)
+        sg.addWidget(self.smith_note_label)
+        right_layout.addWidget(smith_cards, 2)
+
+        probe_box = QGroupBox("Probe Impedance Details")
+        probe_layout = QVBoxLayout(probe_box)
+        self.probe_impedance_label = QLabel("Probe impedance details are available after analysis.")
+        self.probe_impedance_label.setWordWrap(True)
+        self.probe_impedance_label.setStyleSheet("color:#f8fafc;")
+        probe_layout.addWidget(self.probe_impedance_label)
+        right_layout.addWidget(probe_box, 2)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter)
         self._toggle_rlgc_fields()
         self.cable_preset.setCurrentText("DX7 Existing Cable")
 
@@ -429,6 +486,7 @@ class MainWindow(QMainWindow):
                 "CumLoss [W]",
             ]
         )
+        self.probe_table.itemSelectionChanged.connect(self._on_probe_table_selection_changed)
         layout.addWidget(self.probe_table, 1)
 
         self.dist_canvas = MplCanvas(width=12, height=9, dpi=100)
@@ -761,13 +819,23 @@ class MainWindow(QMainWindow):
             if system.sparam_frequency_mhz is not None and abs(system.sparam_frequency_mhz - system.frequency_mhz) > 0.5:
                 all_warnings.append("S-parameter frequency differs from simulation frequency.")
             self.warning_label.setText("\n".join(all_warnings))
+            try:
+                probe_requested = float(self.probe_pos.text())
+            except ValueError:
+                probe_requested = 0.0
+            probe_clamped = min(max(probe_requested, 0.0), float(result.z_m[-1]))
+            self.probe_pos.setText(f"{probe_clamped:.5f}")
+            self.probe_slider.setValue(int(1000.0 * probe_clamped / result.z_m[-1]))
             self._draw_distribution()
+            self._update_smith_chart_full()
             self._update_summary(result, system)
             self._refresh_probe_table()
         except Exception as exc:
             self.last_result = None
             self.system_diag.setText(f"Input Required / Error: {exc}")
             self.live_metrics_label.setText(self._format_live_metrics(None, None))
+            if hasattr(self, "smith_canvas"):
+                self.smith_canvas.clear_chart()
 
     def _format_consistency_diagnostic(self, system: SystemParameters) -> str:
         if system.measured_vpp_v is None:
@@ -850,10 +918,12 @@ class MainWindow(QMainWindow):
         axes[2].plot(z, p, color="#22c55e", label="Real Power")
         axes[3].plot(z, pl, color="#ef4444", label="Local Dissipation")
         axes[4].plot(z, cl, color="#d946ef", label="Cumulative Dissipation")
+        show_hist = self._historical_damage_metadata_available()
         for ax in axes:
             ax.grid(True, alpha=0.25)
             ax.legend(loc="upper right")
-            ax.axvspan(0.10, 0.20, color="#7f1d1d", alpha=0.15)
+            if show_hist:
+                ax.axvspan(0.10, 0.20, color="#7f1d1d", alpha=0.15)
         axes[0].set_ylabel("Vrms [V]")
         axes[1].set_ylabel("Irms [A]")
         axes[2].set_ylabel("P(z) [W]")
@@ -885,7 +955,7 @@ class MainWindow(QMainWindow):
         z = self.last_result.z_m[-1] * value / 1000.0
         self.probe_pos.setText(f"{z:.5f}")
         self._update_probe_readout()
-        self._draw_distribution()
+        self._update_smith_probe_only()
 
     def _on_probe_text(self) -> None:
         if self.last_result is None:
@@ -898,23 +968,64 @@ class MainWindow(QMainWindow):
         self.probe_pos.setText(f"{z:.5f}")
         self.probe_slider.setValue(int(1000.0 * z / self.last_result.z_m[-1]))
         self._update_probe_readout()
-        self._draw_distribution()
+        self._update_smith_probe_only()
 
     def _update_probe_readout(self) -> None:
         if self.last_result is None:
             return
         z = float(self.probe_pos.text())
-        idx = self._position_index(z)
+        probe = self._probe_state_at(z)
         r = self.last_result
-        vrms = np.abs(r.v_rms[idx])
-        irms = np.abs(r.i_rms[idx])
-        pz = r.p_real_w[idx]
-        local = r.p_total_loss_w_per_m[idx]
-        cum = r.p_cumulative_loss_w[idx]
         self.probe_values.setText(
-            f"Probe {z:.3f} m | Vrms={vrms:.2f} V | Irms={irms:.2f} A | "
-            f"P={pz:.2f} W | Local={local:.3f} W/m | Cum={cum:.3f} W"
+            f"Probe {probe['z']:.3f} m | Vrms={probe['vrms']:.2f} V | Irms={probe['irms']:.2f} A | "
+            f"P={probe['p']:.2f} W | Local={probe['local']:.3f} W/m | Cum={probe['cum']:.3f} W"
         )
+        z_ref = r.z0_reference
+        z_ref_txt = (
+            f"Z0 = {z_ref.real:.3f}+j{z_ref.imag:.3f} Ω"
+            if abs(z_ref.imag) > 1e-9
+            else f"Z0 = {z_ref.real:.3f} Ω"
+        )
+        gamma = probe["gamma"]
+        z_local = probe["z_local"]
+        z_norm = probe["z_norm"]
+        probe_warning = ""
+        if not probe["valid_impedance"]:
+            probe_warning = "\nWARNING: Probe impedance invalid because |I(z)| is below numerical tolerance."
+        elif np.isfinite(gamma.real) and np.isfinite(gamma.imag) and abs(gamma) >= 1.0:
+            probe_warning = "\nWARNING: Local |Gamma| >= 1, VSWR is not finite."
+        vswr_text = "N/A"
+        if np.isfinite(gamma.real) and np.isfinite(gamma.imag):
+            local_vswr = vswr_from_gamma(gamma)
+            if np.isfinite(local_vswr):
+                vswr_text = f"{local_vswr:.4f}"
+            elif local_vswr == float("inf"):
+                vswr_text = "Infinity"
+
+        self.probe_impedance_label.setText(
+            "DERIVED FROM V(z)/I(z)\n"
+            f"Probe Position from Match Output [m]: {probe['z']:.3f}\n"
+            f"Probe Position from Cable End [m]: {float(r.z_m[-1]) - probe['z']:.3f}\n"
+            f"Local Impedance Z(z): {z_local.real:+.3f}{z_local.imag:+.3f}j ohm\n"
+            f"Resistance R [ohm]: {z_local.real:.3f}\n"
+            f"Reactance X [ohm]: {z_local.imag:.3f}\n"
+            f"Impedance Magnitude |Z| [ohm]: {abs(z_local):.3f}\n"
+            f"Impedance Phase [deg]: {np.degrees(np.angle(z_local)):.2f}\n"
+            f"Normalized z: {z_norm.real:+.4f}{z_norm.imag:+.4f}j\n"
+            f"Gamma: {gamma.real:+.4f}{gamma.imag:+.4f}j\n"
+            f"|Gamma|: {abs(gamma):.4f}\n"
+            f"Gamma Phase [deg]: {np.degrees(np.angle(gamma)):.2f}\n"
+            f"Local VSWR: {vswr_text}\n"
+            f"Vrms={probe['vrms']:.2f} V | Vpp={2.0 * np.sqrt(2.0) * probe['vrms']:.2f} V | Irms={probe['irms']:.2f} A\n"
+            f"Real RF Power P(z)={probe['p']:.2f} W | Local Dissipation={probe['local']:.3f} W/m | Cumulative Loss={probe['cum']:.3f} W\n"
+            f"Smith Reference {z_ref_txt}"
+            f"{probe_warning}"
+        )
+        self.smith_probe_label.setText(
+            f"PROBE IMPEDANCE\n{z_local.real:+.3f}{z_local.imag:+.3f}j ohm\n@ z = {probe['z']:.3f} m"
+        )
+        self.smith_probe_gamma_label.setText(f"PROBE |GAMMA|\n{abs(gamma):.4f}")
+        self._draw_distribution()
 
     def _refresh_probe_table(self) -> None:
         if self.last_result is None:
@@ -922,6 +1033,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         r = self.last_result
         values = []
+        self._measurement_row_positions = []
         for token in self.multi_positions.text().split(","):
             t = token.strip()
             if not t:
@@ -934,6 +1046,7 @@ class MainWindow(QMainWindow):
                 continue
             idx = self._position_index(z)
             vrms = np.abs(r.v_rms[idx])
+            self._measurement_row_positions.append(z)
             values.append(
                 (
                     z,
@@ -950,6 +1063,134 @@ class MainWindow(QMainWindow):
         for i, row in enumerate(values):
             for j, v in enumerate(row):
                 self.probe_table.setItem(i, j, QTableWidgetItem(f"{v:.6g}"))
+        self._update_smith_measurement_markers()
+
+    def _historical_damage_metadata_available(self) -> bool:
+        return self.cable_preset.currentText().strip() == "DX7 Existing Cable"
+
+    @staticmethod
+    def _interpolate_complex(x: np.ndarray, y: np.ndarray, x0: float) -> complex:
+        real = float(np.interp(x0, x, y.real))
+        imag = float(np.interp(x0, x, y.imag))
+        return complex(real, imag)
+
+    def _probe_state_at(self, z_probe: float) -> dict:
+        if self.last_result is None:
+            return {}
+        r = self.last_result
+        z_probe = min(max(z_probe, 0.0), float(r.z_m[-1]))
+        z_local = self._interpolate_complex(r.z_m, r.z_local_ohm, z_probe)
+        gamma = self._interpolate_complex(r.z_m, r.gamma_local, z_probe)
+        z_norm = self._interpolate_complex(r.z_m, r.z_normalized, z_probe)
+        vrms = float(np.interp(z_probe, r.z_m, np.abs(r.v_rms)))
+        irms = float(np.interp(z_probe, r.z_m, np.abs(r.i_rms)))
+        pz = float(np.interp(z_probe, r.z_m, r.p_real_w))
+        local = float(np.interp(z_probe, r.z_m, r.p_total_loss_w_per_m))
+        cum = float(np.interp(z_probe, r.z_m, r.p_cumulative_loss_w))
+        valid_impedance = np.isfinite(z_local.real) and np.isfinite(z_local.imag)
+        return {
+            "z": z_probe,
+            "z_local": z_local,
+            "gamma": gamma,
+            "z_norm": z_norm,
+            "vrms": vrms,
+            "irms": irms,
+            "p": pz,
+            "local": local,
+            "cum": cum,
+            "valid_impedance": valid_impedance,
+        }
+
+    def _format_smith_hover(self, idx: int) -> str:
+        if self.last_result is None:
+            return ""
+        r = self.last_result
+        z = float(r.z_m[idx])
+        z_local = complex(r.z_local_ohm[idx])
+        z_norm = complex(r.z_normalized[idx])
+        gamma = complex(r.gamma_local[idx])
+        return (
+            f"z={z:.3f} m\n"
+            f"Z={z_local.real:+.3f}{z_local.imag:+.3f}j Ω\n"
+            f"z_norm={z_norm.real:+.3f}{z_norm.imag:+.3f}j\n"
+            f"Γ={gamma.real:+.4f}{gamma.imag:+.4f}j\n"
+            f"Vrms={abs(r.v_rms[idx]):.2f} V | Irms={abs(r.i_rms[idx]):.2f} A"
+        )
+
+    def _update_smith_measurement_markers(self) -> None:
+        if self.last_result is None:
+            return
+        r = self.last_result
+        gamma_values: list[complex] = []
+        for z in self._measurement_row_positions:
+            gamma_values.append(self._interpolate_complex(r.z_m, r.gamma_local, z))
+        self.smith_canvas.set_measurement_markers(self._measurement_row_positions, gamma_values)
+        self.smith_canvas.refresh_chart()
+
+    def _update_smith_probe_only(self) -> None:
+        if self.last_result is None:
+            return
+        probe = self._probe_state_at(float(self.probe_pos.text()))
+        self.smith_canvas.set_probe(
+            probe["z"],
+            probe["gamma"],
+            probe["z_local"],
+            invalid=(not probe["valid_impedance"]),
+        )
+        self.smith_canvas.refresh_chart()
+
+    def _update_smith_chart_full(self) -> None:
+        if self.last_result is None:
+            self.smith_canvas.clear_chart()
+            return
+        r = self.last_result
+        title = f"Cable Position Trajectory at {self._active_frequency_mhz():.3f} MHz"
+        self.smith_canvas.set_trajectory(r.gamma_local, r.z_m, title=title)
+        self.smith_canvas.set_endpoints(complex(r.gamma_local[0]), complex(r.gamma_local[-1]))
+
+        if self._historical_damage_metadata_available():
+            damage_mask = (r.z_m >= 0.10) & (r.z_m <= 0.20)
+            damage_gamma = np.full(r.gamma_local.shape, np.nan + 1j * np.nan, dtype=np.complex128)
+            damage_gamma[damage_mask] = r.gamma_local[damage_mask]
+            self.smith_canvas.set_historical_region(damage_gamma, enabled=True)
+            self.smith_note_label.setText("Historical Damage Distance: 0.10 m to 0.20 m (Reference Direction Unverified)")
+        else:
+            self.smith_canvas.set_historical_region(np.array([], dtype=np.complex128), enabled=False)
+            self.smith_note_label.setText("")
+
+        z0 = r.z0_reference
+        if abs(z0.imag) > 1e-9:
+            self.smith_ref_label.setText(f"SMITH REFERENCE\nComplex Z0 = {z0.real:.3f}+j{z0.imag:.3f} ohm")
+            self.smith_note_label.setText(
+                self.smith_note_label.text()
+                + "\nSmith Chart uses active complex reference impedance. Real-Z0 grid is visual reference only."
+            )
+        else:
+            self.smith_ref_label.setText(f"SMITH REFERENCE\nZ0 = {z0.real:.3f} ohm")
+
+        z_match = complex(r.z_local_ohm[0])
+        z_end = complex(r.z_local_ohm[-1])
+        self.smith_match_label.setText(f"MATCH OUTPUT IMPEDANCE\n{z_match.real:+.3f}{z_match.imag:+.3f}j ohm")
+        self.smith_end_label.setText(f"CABLE END IMPEDANCE\n{z_end.real:+.3f}{z_end.imag:+.3f}j ohm")
+        self._update_smith_measurement_markers()
+        self._update_smith_probe_only()
+
+    def _on_smith_probe_selected(self, z_m: float) -> None:
+        if self.last_result is None:
+            return
+        z_clamped = min(max(float(z_m), 0.0), float(self.last_result.z_m[-1]))
+        self.probe_pos.setText(f"{z_clamped:.5f}")
+        self.probe_slider.setValue(int(1000.0 * z_clamped / self.last_result.z_m[-1]))
+        self._update_probe_readout()
+
+    def _on_probe_table_selection_changed(self) -> None:
+        row = self.probe_table.currentRow()
+        if row < 0 or row >= len(self._measurement_row_positions) or self.last_result is None:
+            return
+        z = self._measurement_row_positions[row]
+        self.probe_pos.setText(f"{z:.5f}")
+        self.probe_slider.setValue(int(1000.0 * z / self.last_result.z_m[-1]))
+        self._update_probe_readout()
 
     def run_sweep(self) -> None:
         try:
@@ -1023,7 +1264,7 @@ class MainWindow(QMainWindow):
             w.writerow([])
             w.writerow(
                 [
-                    "z_m",
+                    "position_m",
                     "V_rms",
                     "I_rms",
                     "P_real_W",
@@ -1031,9 +1272,24 @@ class MainWindow(QMainWindow):
                     "P_diel_W_per_m",
                     "P_total_loss_W_per_m",
                     "P_cumulative_loss_W",
+                    "z_local_real_ohm",
+                    "z_local_imag_ohm",
+                    "z_local_magnitude_ohm",
+                    "z_local_phase_deg",
+                    "z_normalized_real",
+                    "z_normalized_imag",
+                    "gamma_real",
+                    "gamma_imag",
+                    "gamma_magnitude",
+                    "gamma_phase_deg",
+                    "smith_reference_z0_real_ohm",
+                    "smith_reference_z0_imag_ohm",
                 ]
             )
             for i in range(len(r.z_m)):
+                z_local = complex(r.z_local_ohm[i])
+                z_norm = complex(r.z_normalized[i])
+                gamma = complex(r.gamma_local[i])
                 w.writerow(
                     [
                         r.z_m[i],
@@ -1044,8 +1300,42 @@ class MainWindow(QMainWindow):
                         r.p_diel_w_per_m[i],
                         r.p_total_loss_w_per_m[i],
                         r.p_cumulative_loss_w[i],
+                        z_local.real,
+                        z_local.imag,
+                        abs(z_local),
+                        np.degrees(np.angle(z_local)),
+                        z_norm.real,
+                        z_norm.imag,
+                        gamma.real,
+                        gamma.imag,
+                        abs(gamma),
+                        np.degrees(np.angle(gamma)),
+                        r.z0_reference.real,
+                        r.z0_reference.imag,
                     ]
                 )
+
+    def export_smith_chart_image(self) -> None:
+        if self.last_result is None:
+            return
+        freq = self._active_frequency_mhz()
+        z0 = self.last_result.z0_reference
+        default_name = f"smith_chart_{freq:.3f}MHz_{float(self.last_result.z_m[-1]):.3f}m_{z0.real:.2f}ohm.png"
+        safe_name = (
+            default_name.replace(":", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+            .replace("*", "_")
+            .replace("?", "_")
+            .replace('"', "_")
+            .replace("<", "_")
+            .replace(">", "_")
+            .replace("|", "_")
+        )
+        path, _ = QFileDialog.getSaveFileName(self, "Export Smith Chart Image", safe_name, "PNG (*.png)")
+        if not path:
+            return
+        self.smith_canvas.export_png(path)
 
     def export_sweep_csv(self) -> None:
         if self.last_sweep is None:
@@ -1104,5 +1394,10 @@ class MainWindow(QMainWindow):
             f"Total Delivery Efficiency = {eta_total:.3f}%\n\n"
             f"Gamma_L = {abs(r.gamma_l):.4f} ∠ {r.gamma_phase_deg:.2f} deg, "
             f"VSWR = {r.vswr:.4f}, Return Loss = {r.return_loss_db:.2f} dB\n"
-            f"Electrical length = {r.electrical_length_deg:.2f} deg"
+            f"Electrical length = {r.electrical_length_deg:.2f} deg\n\n"
+            f"Endpoint consistency (from V/I)\n"
+            f"z=0 Delta_Z = {r.endpoint_match_delta_ohm.real:+.4g}{r.endpoint_match_delta_ohm.imag:+.4g}j ohm "
+            f"(rel err {r.endpoint_match_rel_error:.3e})\n"
+            f"z=L Delta_Z = {r.endpoint_end_delta_ohm.real:+.4g}{r.endpoint_end_delta_ohm.imag:+.4g}j ohm "
+            f"(rel err {r.endpoint_end_rel_error:.3e})"
         )
