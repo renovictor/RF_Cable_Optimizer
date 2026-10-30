@@ -1,5 +1,20 @@
 # Changelog
 
+## V2026.10.6 - 2026-10-31
+
+- Added scrollable Cable Analysis sub-panels with targeted layout refinements: dedicated scrolling for Power Flow, Critical-Point Cards, Smith Chart Summary, Probe Impedance Details, and cable-input area horizontal scrolling support.
+- Added optional **Match-Side Connector / Transition** modeling with two implemented modes:
+  - **Coordinate Offset Only** (coordinate relabeling only, RF solution unchanged)
+  - **Transmission-Line Section** (connector included in cascaded RF path and power accounting)
+- Extended distributed analysis outputs with connector-aware section coordinates, cable-start offsets, connector metrics (electrical length/delay), and connector-inclusive power-balance terms.
+- Updated Smith Chart behavior and visualization for connector workflows, including segmented trajectories in transmission-line mode and restored probe interaction synchronization.
+- Updated menus and UX:
+  - Added **File** actions for profile CSV and Smith image export
+  - Added **Analysis -> Run Analysis**
+  - Added **Window** menu tab shortcuts
+  - Added **Help -> About** dialog with version and project metadata
+- Added/updated automated tests covering connector coordinates, connector transmission-line behavior, connector power balance, scrollable panel behavior, and related GUI regressions.
+
 ## V2026.10.5 - 2026-10-30
 
 - Added new engineering markers and cards for **Lowest-Impedance Point** (`argmin |Z(z)|`) and **Maximum-Current Point** (`argmax |I(z)|`) using existing distributed RF analysis arrays.
