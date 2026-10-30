@@ -37,7 +37,9 @@ HELP_HTML = """
 <p>AA-11459 attenuation can be used in MANUFACTURER TABLE ONLY mode (no direct 60 MHz value) or INTERPOLATE BETWEEN PUBLISHED POINTS mode (explicitly labeled INTERPOLATED with source points).</p>
 
 <h2>6. Cable Analysis</h2>
-<p>Press <b>Run Analysis</b>. Key result cards include Match Output Power, Cable Dissipation, Cable End Delivered Power, Maximum Voltage, Maximum Current, and Maximum Local Dissipation.</p>
+<p>Press <b>Run Analysis</b>. Key result cards include Match Output Power, Cable Dissipation, Cable End Delivered Power, Maximum Voltage, Maximum Current, Maximum Local Dissipation, Lowest-Impedance Point, and Maximum-Current Point.</p>
+<p>Lowest-impedance point is defined by <code>argmin(|Z(z)|)</code> with <code>Z(z)=V(z)/I(z)</code>, not by reactance crossing alone.</p>
+<p>Maximum-current point is defined by <code>argmax(|I(z)|)</code>. These two points can be close, but they are not forced to be identical.</p>
 
 <h2>7. Voltage / Current Distribution</h2>
 <p>Plots include Voltage RMS, Current RMS, Real RF Power, Local Dissipation, and Cumulative Dissipation versus cable position.</p>

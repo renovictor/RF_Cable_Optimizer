@@ -11,6 +11,65 @@ from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, S
 
 
 class PowerBalanceTests(unittest.TestCase):
+    def test_engineering_points_use_valid_indices(self) -> None:
+        system = SystemParameters(
+            frequency_mhz=60.0,
+            match_input_power_w=1300.0,
+            match_output_power_source=MatchOutputPowerSource.IDEAL,
+            match_output_impedance=ComplexImpedance(3.0, 19.0),
+        )
+        cable = CableParameters(
+            z0_ohm=50.0,
+            length_m=1.03,
+            velocity_factor=0.76,
+            attenuation_value=0.6,
+            attenuation_unit=AttenuationUnit.DB_PER_100FT,
+            model_mode=CableModelMode.DATASHEET,
+        )
+        chamber = ChamberParameters(mode=ChamberImpedanceMode.DERIVED_FROM_MATCH)
+        result = analyze_cable(system, cable, chamber)
+        self.assertIsNotNone(result.min_impedance_index)
+        self.assertIsNotNone(result.max_current_index)
+        assert result.min_impedance_index is not None
+        assert result.max_current_index is not None
+        valid = (
+            np.isfinite(np.abs(result.v_rms))
+            & np.isfinite(np.abs(result.i_rms))
+            & np.isfinite(result.p_real_w)
+            & np.isfinite(result.z_local_ohm.real)
+            & np.isfinite(result.z_local_ohm.imag)
+            & np.isfinite(np.abs(result.z_local_ohm))
+            & (np.abs(result.i_rms) >= 1e-12)
+        )
+        self.assertAlmostEqual(
+            result.min_impedance_magnitude_ohm,
+            float(np.min(np.abs(result.z_local_ohm[valid]))),
+            places=6,
+        )
+        self.assertAlmostEqual(result.max_current_irms_a, float(np.max(np.abs(result.i_rms[valid]))), places=6)
+
+    def test_engineering_points_are_not_available_without_valid_current(self) -> None:
+        system = SystemParameters(
+            frequency_mhz=60.0,
+            match_input_power_w=0.0,
+            match_output_power_source=MatchOutputPowerSource.IDEAL,
+            match_output_impedance=ComplexImpedance(50.0, 0.0),
+        )
+        cable = CableParameters(
+            z0_ohm=50.0,
+            length_m=1.0,
+            velocity_factor=0.76,
+            attenuation_value=0.0,
+            attenuation_unit=AttenuationUnit.DB_PER_M,
+            model_mode=CableModelMode.DATASHEET,
+        )
+        chamber = ChamberParameters(mode=ChamberImpedanceMode.DERIVED_FROM_MATCH)
+        result = analyze_cable(system, cable, chamber)
+        self.assertIsNone(result.min_impedance_index)
+        self.assertIsNone(result.max_current_index)
+        self.assertIsNone(result.min_impedance_magnitude_ohm)
+        self.assertIsNone(result.max_current_irms_a)
+
     def test_lossless_mismatch_has_zero_cable_dissipation(self) -> None:
         system = SystemParameters(
             frequency_mhz=60.0,

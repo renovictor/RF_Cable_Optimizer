@@ -37,6 +37,8 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._probe_artist = None
         self._endpoint_match = None
         self._endpoint_load = None
+        self._min_impedance_artist = None
+        self._max_current_artist = None
         self._historical_artist = None
         self._measurement_artists: list = []
         self._measurement_labels: list = []
@@ -53,6 +55,8 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._probe_artist = None
         self._endpoint_match = None
         self._endpoint_load = None
+        self._min_impedance_artist = None
+        self._max_current_artist = None
         self._historical_artist = None
         self._measurement_artists = []
         self._measurement_labels = []
@@ -191,6 +195,42 @@ class SmithChartCanvas(FigureCanvasQTAgg):
             else f"Probe @ {position_m:.3f} m\nZ invalid"
         )
         self._probe_annotation.set_visible(True)
+
+    def set_engineering_markers(self, min_impedance_gamma: complex | None, max_current_gamma: complex | None) -> None:
+        if min_impedance_gamma is not None and np.isfinite(min_impedance_gamma.real) and np.isfinite(min_impedance_gamma.imag):
+            (self._min_impedance_artist,) = self.ax.plot(
+                [min_impedance_gamma.real],
+                [min_impedance_gamma.imag],
+                marker="P",
+                markersize=9,
+                color="#f97316",
+                markeredgecolor="#111827",
+                zorder=8,
+            )
+            self.ax.text(
+                min_impedance_gamma.real + 0.03,
+                min_impedance_gamma.imag + 0.03,
+                "Min |Z|",
+                color="#fdba74",
+                fontsize=8,
+            )
+        if max_current_gamma is not None and np.isfinite(max_current_gamma.real) and np.isfinite(max_current_gamma.imag):
+            (self._max_current_artist,) = self.ax.plot(
+                [max_current_gamma.real],
+                [max_current_gamma.imag],
+                marker="^",
+                markersize=8,
+                color="#a78bfa",
+                markeredgecolor="#111827",
+                zorder=8,
+            )
+            self.ax.text(
+                max_current_gamma.real + 0.03,
+                max_current_gamma.imag - 0.05,
+                "Max |I|",
+                color="#c4b5fd",
+                fontsize=8,
+            )
 
     def set_measurement_markers(self, positions_m: list[float], gamma_values: list[complex]) -> None:
         for artist in self._measurement_artists:

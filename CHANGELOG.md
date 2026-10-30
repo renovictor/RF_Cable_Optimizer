@@ -1,5 +1,12 @@
 # Changelog
 
+## V2026.10.5 - 2026-10-30
+
+- Added new engineering markers and cards for **Lowest-Impedance Point** (`argmin |Z(z)|`) and **Maximum-Current Point** (`argmax |I(z)|`) using existing distributed RF analysis arrays.
+- Added robust valid-point filtering (NaN/Inf and low-current exclusion via current epsilon) so invalid samples cannot be selected as engineering extrema.
+- Added Smith Chart overlays and distribution-plot position markers for both new engineering points.
+- Updated help content and expanded automated tests for the new point calculations and UI states (including `Not Available` handling).
+
 ## V2026.10.4 - 2026-10-30
 
 - Added interactive Smith Chart integration on Cable Analysis using distributed V(z)/I(z)-derived impedance and Gamma arrays from the analysis engine.

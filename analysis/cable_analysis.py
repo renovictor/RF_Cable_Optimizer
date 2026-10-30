@@ -26,6 +26,9 @@ from rf.transmission_line import (
 from rf.two_port import SParameters, evaluate_match_efficiency
 
 
+CURRENT_EPSILON_A = 1e-12
+
+
 @dataclass
 class CableAnalysisResult:
     z_m: np.ndarray
@@ -64,6 +67,24 @@ class CableAnalysisResult:
     cable_loss_percent: float
     power_balance_error_w: float
     power_balance_error_percent: float
+    min_impedance_index: int | None
+    min_impedance_z_m: float | None
+    min_impedance_z_ohm: complex | None
+    min_impedance_r_ohm: float | None
+    min_impedance_x_ohm: float | None
+    min_impedance_magnitude_ohm: float | None
+    min_impedance_irms_a: float | None
+    min_impedance_vrms_v: float | None
+    min_impedance_real_power_w: float | None
+    max_current_index: int | None
+    max_current_z_m: float | None
+    max_current_z_ohm: complex | None
+    max_current_r_ohm: float | None
+    max_current_x_ohm: float | None
+    max_current_magnitude_ohm: float | None
+    max_current_irms_a: float | None
+    max_current_vrms_v: float | None
+    max_current_real_power_w: float | None
     warnings: list[str]
 
 
@@ -170,6 +191,72 @@ def analyze_cable(
     )
     endpoint_end_rel_error = abs(endpoint_end_delta) / abs(z_load) if abs(z_load) > 0 else float("inf")
 
+    v_abs = np.abs(v_rms)
+    i_abs = np.abs(i_rms)
+    z_abs = np.abs(z_local_ohm)
+    valid_point_mask = (
+        np.isfinite(v_abs)
+        & np.isfinite(i_abs)
+        & np.isfinite(p_real_w)
+        & np.isfinite(z_local_ohm.real)
+        & np.isfinite(z_local_ohm.imag)
+        & np.isfinite(z_abs)
+        & (i_abs >= CURRENT_EPSILON_A)
+    )
+    valid_indices = np.flatnonzero(valid_point_mask)
+
+    min_impedance_index: int | None = None
+    max_current_index: int | None = None
+    if len(valid_indices) > 0:
+        min_impedance_index = int(valid_indices[np.argmin(z_abs[valid_indices])])
+        max_current_index = int(valid_indices[np.argmax(i_abs[valid_indices])])
+
+    def _point_metrics(index: int | None) -> tuple[
+        float | None,
+        complex | None,
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+    ]:
+        if index is None:
+            return (None, None, None, None, None, None, None, None)
+        z_value = complex(z_local_ohm[index])
+        return (
+            float(z_m[index]),
+            z_value,
+            float(z_value.real),
+            float(z_value.imag),
+            float(z_abs[index]),
+            float(i_abs[index]),
+            float(v_abs[index]),
+            float(p_real_w[index]),
+        )
+
+    (
+        min_impedance_z_m,
+        min_impedance_z_ohm,
+        min_impedance_r_ohm,
+        min_impedance_x_ohm,
+        min_impedance_magnitude_ohm,
+        min_impedance_irms_a,
+        min_impedance_vrms_v,
+        min_impedance_real_power_w,
+    ) = _point_metrics(min_impedance_index)
+
+    (
+        max_current_z_m,
+        max_current_z_ohm,
+        max_current_r_ohm,
+        max_current_x_ohm,
+        max_current_magnitude_ohm,
+        max_current_irms_a,
+        max_current_vrms_v,
+        max_current_real_power_w,
+    ) = _point_metrics(max_current_index)
+
     warnings: list[str] = []
     if vswr(gl) > system.thresholds.vswr:
         warnings.append("High VSWR threshold exceeded.")
@@ -232,5 +319,23 @@ def analyze_cable(
         cable_loss_percent=p_cable_loss_pct,
         power_balance_error_w=p_balance_err,
         power_balance_error_percent=p_balance_err_pct,
+        min_impedance_index=min_impedance_index,
+        min_impedance_z_m=min_impedance_z_m,
+        min_impedance_z_ohm=min_impedance_z_ohm,
+        min_impedance_r_ohm=min_impedance_r_ohm,
+        min_impedance_x_ohm=min_impedance_x_ohm,
+        min_impedance_magnitude_ohm=min_impedance_magnitude_ohm,
+        min_impedance_irms_a=min_impedance_irms_a,
+        min_impedance_vrms_v=min_impedance_vrms_v,
+        min_impedance_real_power_w=min_impedance_real_power_w,
+        max_current_index=max_current_index,
+        max_current_z_m=max_current_z_m,
+        max_current_z_ohm=max_current_z_ohm,
+        max_current_r_ohm=max_current_r_ohm,
+        max_current_x_ohm=max_current_x_ohm,
+        max_current_magnitude_ohm=max_current_magnitude_ohm,
+        max_current_irms_a=max_current_irms_a,
+        max_current_vrms_v=max_current_vrms_v,
+        max_current_real_power_w=max_current_real_power_w,
         warnings=warnings,
     )

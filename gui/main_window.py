@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
-from analysis.cable_analysis import CableAnalysisResult, analyze_cable
+from analysis.cable_analysis import CURRENT_EPSILON_A, CableAnalysisResult, analyze_cable
 from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
 from gui.help_window import HelpWindow
 from gui.plots import MplCanvas
@@ -359,6 +359,12 @@ class MainWindow(QMainWindow):
         )
         self.current_comparison_label.setStyleSheet("color:#e9d5ff;")
         cg.addWidget(self.current_comparison_label, 4, 0, 1, 3)
+        self.min_impedance_point_label = QLabel("LOWEST-IMPEDANCE POINT\nNot Available")
+        self.min_impedance_point_label.setStyleSheet("color:#fdba74; border:1px solid #334155; border-radius:8px; padding:8px;")
+        cg.addWidget(self.min_impedance_point_label, 5, 0, 1, 3)
+        self.max_current_point_label = QLabel("MAXIMUM-CURRENT POINT\nNot Available")
+        self.max_current_point_label.setStyleSheet("color:#c4b5fd; border:1px solid #334155; border-radius:8px; padding:8px;")
+        cg.addWidget(self.max_current_point_label, 6, 0, 1, 3)
 
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
@@ -853,7 +859,6 @@ class MainWindow(QMainWindow):
 
     def _update_cards(self, r: CableAnalysisResult, system: SystemParameters) -> None:
         vmax_idx = int(np.argmax(np.abs(r.v_rms)))
-        imax_idx = int(np.argmax(np.abs(r.i_rms)))
         wmax_idx = int(np.argmax(r.p_total_loss_w_per_m))
         eta_match = (r.match_output_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
         eta_cable = (r.chamber_power_w / r.match_output_power_w * 100.0) if r.match_output_power_w > 0 else 0.0
@@ -868,23 +873,54 @@ class MainWindow(QMainWindow):
             f"Cable Efficiency [%]: {eta_cable:.2f}\n"
             f"Overall Delivery Efficiency [%]: {eta_total:.2f}"
         )
+        max_current_text = "Not Available"
+        if r.max_current_index is not None and r.max_current_irms_a is not None and r.max_current_z_m is not None:
+            max_current_text = f"{r.max_current_irms_a:.2f} Arms @ {r.max_current_z_m:.3f} m"
         self.stress_metrics_label.setText(
             f"MAX VOLTAGE: {np.abs(r.v_rms[vmax_idx]):.2f} Vrms @ {r.z_m[vmax_idx]:.3f} m   |   "
-            f"MAX CURRENT: {np.abs(r.i_rms[imax_idx]):.2f} Arms @ {r.z_m[imax_idx]:.3f} m   |   "
+            f"MAX CURRENT: {max_current_text}   |   "
             f"MAX LOCAL DISSIPATION: {r.p_total_loss_w_per_m[wmax_idx]:.3f} W/m @ {r.z_m[wmax_idx]:.3f} m"
         )
         z0_ohm = self._as_float_or_none(self.z0.text())
         i_matched = 0.0
         if z0_ohm is not None and z0_ohm > 0 and r.match_output_power_w >= 0:
             i_matched = math.sqrt(r.match_output_power_w / z0_ohm)
-        i_sim_max = float(np.abs(r.i_rms[imax_idx]))
+        i_sim_max = r.max_current_irms_a if r.max_current_irms_a is not None else float("nan")
         k_i = (i_sim_max / i_matched) if i_matched > 0 else float("nan")
+        max_current_pos = f"{r.max_current_z_m:.3f} m" if r.max_current_z_m is not None else "Not Available"
         self.current_comparison_label.setText(
-            f"SIMULATED MAXIMUM CURRENT\n{i_sim_max:.2f} Arms @ {r.z_m[imax_idx]:.3f} m\n"
+            f"SIMULATED MAXIMUM CURRENT\n{i_sim_max:.2f} Arms @ {max_current_pos}\n"
             f"MATCHED-LINE CURRENT AT MATCH OUTPUT POWER\n{i_matched:.2f} Arms [DERIVED]\n"
             f"Current Enhancement: {k_i:.2f} x"
         )
+        self.min_impedance_point_label.setText(self._format_engineering_point_card("LOWEST-IMPEDANCE POINT", r, "min"))
+        self.max_current_point_label.setText(self._format_engineering_point_card("MAXIMUM-CURRENT POINT", r, "max"))
         self.live_metrics_label.setText(self._format_live_metrics(r, system))
+
+    def _format_engineering_point_card(self, title: str, r: CableAnalysisResult, point_kind: str) -> str:
+        if point_kind == "min":
+            z_pos = r.min_impedance_z_m
+            z_local = r.min_impedance_z_ohm
+            z_mag = r.min_impedance_magnitude_ohm
+            irms = r.min_impedance_irms_a
+            vrms = r.min_impedance_vrms_v
+            p_real = r.min_impedance_real_power_w
+        else:
+            z_pos = r.max_current_z_m
+            z_local = r.max_current_z_ohm
+            z_mag = r.max_current_magnitude_ohm
+            irms = r.max_current_irms_a
+            vrms = r.max_current_vrms_v
+            p_real = r.max_current_real_power_w
+        if z_pos is None or z_local is None or z_mag is None or irms is None or vrms is None or p_real is None:
+            return f"{title}\nNot Available"
+        return (
+            f"{title}\n"
+            f"z = {z_pos:.3f} m\n"
+            f"Z = {z_local.real:+.3f}{z_local.imag:+.3f}j ohm  (|Z|={z_mag:.3f} ohm)\n"
+            f"R = {z_local.real:.3f} ohm, X = {z_local.imag:.3f} ohm\n"
+            f"Irms = {irms:.3f} A, Vrms = {vrms:.3f} V, P = {p_real:.3f} W"
+        )
 
     def _format_live_metrics(self, r: CableAnalysisResult | None, system: SystemParameters | None) -> str:
         thresholds = (system.thresholds if system is not None else SystemParameters().thresholds)
@@ -943,6 +979,10 @@ class MainWindow(QMainWindow):
             return
         for ax in axes:
             ax.axvline(z_probe, color="#facc15", linestyle="--", linewidth=1.2)
+            if self.last_result.min_impedance_z_m is not None:
+                ax.axvline(self.last_result.min_impedance_z_m, color="#f97316", linestyle=":", linewidth=1.2)
+            if self.last_result.max_current_z_m is not None:
+                ax.axvline(self.last_result.max_current_z_m, color="#a78bfa", linestyle="-.", linewidth=1.2)
 
     def _position_index(self, pos_m: float) -> int:
         r = self.last_result
@@ -1087,7 +1127,12 @@ class MainWindow(QMainWindow):
         pz = float(np.interp(z_probe, r.z_m, r.p_real_w))
         local = float(np.interp(z_probe, r.z_m, r.p_total_loss_w_per_m))
         cum = float(np.interp(z_probe, r.z_m, r.p_cumulative_loss_w))
-        valid_impedance = np.isfinite(z_local.real) and np.isfinite(z_local.imag)
+        valid_impedance = (
+            np.isfinite(z_local.real)
+            and np.isfinite(z_local.imag)
+            and np.isfinite(irms)
+            and (irms >= CURRENT_EPSILON_A)
+        )
         return {
             "z": z_probe,
             "z_local": z_local,
@@ -1147,6 +1192,9 @@ class MainWindow(QMainWindow):
         title = f"Cable Position Trajectory at {self._active_frequency_mhz():.3f} MHz"
         self.smith_canvas.set_trajectory(r.gamma_local, r.z_m, title=title)
         self.smith_canvas.set_endpoints(complex(r.gamma_local[0]), complex(r.gamma_local[-1]))
+        min_impedance_gamma = complex(r.gamma_local[r.min_impedance_index]) if r.min_impedance_index is not None else None
+        max_current_gamma = complex(r.gamma_local[r.max_current_index]) if r.max_current_index is not None else None
+        self.smith_canvas.set_engineering_markers(min_impedance_gamma, max_current_gamma)
 
         if self._historical_damage_metadata_available():
             damage_mask = (r.z_m >= 0.10) & (r.z_m <= 0.20)

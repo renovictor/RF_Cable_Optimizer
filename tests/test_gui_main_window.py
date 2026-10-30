@@ -158,6 +158,20 @@ class MainWindowGuiTests(unittest.TestCase):
         r = self.window.last_result
         self.assertAlmostEqual(r.match_input_power_w, r.match_loss_w + r.cable_loss_w + r.chamber_power_w, places=6)
 
+    def test_engineering_point_cards_are_populated(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        self.assertIn("LOWEST-IMPEDANCE POINT", self.window.min_impedance_point_label.text())
+        self.assertIn("MAXIMUM-CURRENT POINT", self.window.max_current_point_label.text())
+        self.assertIn("z =", self.window.min_impedance_point_label.text())
+
+    def test_engineering_point_cards_show_not_available_when_current_is_zero(self) -> None:
+        self.window.p_match_in_w.setText("0")
+        self.window.recalculate()
+        self.app.processEvents()
+        self.assertIn("Not Available", self.window.min_impedance_point_label.text())
+        self.assertIn("Not Available", self.window.max_current_point_label.text())
+
 
 if __name__ == "__main__":
     unittest.main()
