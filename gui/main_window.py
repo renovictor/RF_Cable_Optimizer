@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QDoubleValidator, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QDoubleValidator, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 
 from analysis.cable_analysis import CURRENT_EPSILON_A, CableAnalysisResult, analyze_cable
 from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
+from gui.thermal_plot import draw_lumped_temperature_plot
 from gui.help_window import HelpWindow
 from gui.plots import MplCanvas
 from gui.cable_spec_panel import CableSpecificationPanel
@@ -47,6 +48,9 @@ from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, M
 from models.validation import validate_inputs
 from rf.coax import inner_diameter_for_target_z0, z0_from_geometry
 from rf.smith_math import vswr_from_gamma
+from thermal.engine import available_heating_sources, run_thermal_analysis
+from thermal.models import ThermalHeatingSource, ThermalInputs, ThermalModel, ThermalRegionSelection, ThermalRequest
+from thermal.validation import validate_thermal_request
 from version import APP_VERSION
 
 
@@ -66,6 +70,7 @@ def _text_line_edit(value: str, tooltip: str) -> QLineEdit:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self._ui_ready = False
         self.setWindowTitle(f"RF Match-to-Chamber Cable Engineering Analyzer - {APP_VERSION}")
         icon_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
         icon_path = icon_base / "smithchart.ico"
@@ -74,6 +79,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 980)
         self._apply_theme()
         self.last_result: CableAnalysisResult | None = None
+        self.last_thermal_result = None
         self.last_sweep: SweepResult | None = None
         self.help_window: HelpWindow | None = None
         self._measurement_row_positions: list[float] = []
@@ -89,11 +95,15 @@ class MainWindow(QMainWindow):
         self._build_system_tab()
         self._build_cable_tab()
         self._build_distribution_tab()
+        self._build_thermal_tab()
         self._build_optimization_tab()
         self._build_coax_tab()
         self._build_summary_tab()
+        self._build_feed_image_tab("Top feed", "Top_feed.png", "top_feed_image_label")
+        self._build_feed_image_tab("Bottom feed", "Bottom_feed.png", "bottom_feed_image_label")
         self._create_menu_bar()
 
+        self._ui_ready = True
         self.recalculate()
 
     def _create_menu_bar(self) -> None:
@@ -565,6 +575,250 @@ class MainWindow(QMainWindow):
         self.dist_canvas = MplCanvas(width=12, height=9, dpi=100)
         layout.addWidget(self.dist_canvas, 4)
 
+    def _build_thermal_tab(self) -> None:
+        tab = QWidget()
+        self.tabs.addTab(tab, "Thermal Analysis")
+        layout = QVBoxLayout(tab)
+
+        top_splitter = QSplitter(Qt.Horizontal)
+
+        source_box = QGroupBox("Thermal Heating Source")
+        source_form = QFormLayout(source_box)
+        self.thermal_model = QComboBox()
+        self.thermal_model.addItem(ThermalModel.LUMPED_RC.value, ThermalModel.LUMPED_RC)
+        self.thermal_model.addItem(ThermalModel.DISTRIBUTED_1D.value, ThermalModel.DISTRIBUTED_1D)
+        self.thermal_model.setCurrentIndex(0)
+        self.thermal_source_combo = QComboBox()
+        self.thermal_rf_heating_power = QLabel("RF-DERIVED HEATING POWER\n- W")
+        self.thermal_rf_heating_power.setStyleSheet("color:#f97316; border:1px solid #334155; border-radius:8px; padding:8px;")
+        self.thermal_heating_source_origin = QLabel("Source: RF Cable Analysis")
+        self.thermal_source_detail = QLabel("Thermal source: -")
+        self.thermal_connector_status = QLabel("Connector Dissipation: NOT MODELED")
+        self.thermal_connector_status.setStyleSheet("color:#facc15;")
+        source_form.addRow("Thermal Model", self.thermal_model)
+        source_form.addRow("Thermal Heating Source", self.thermal_source_combo)
+        source_form.addRow(self.thermal_rf_heating_power)
+        source_form.addRow(self.thermal_heating_source_origin)
+        source_form.addRow(self.thermal_source_detail)
+        source_form.addRow(self.thermal_connector_status)
+        distributed_note = QLabel("Distributed 1D thermal model is prepared for future release and not yet implemented.")
+        distributed_note.setWordWrap(True)
+        distributed_note.setStyleSheet("color:#93c5fd;")
+        source_form.addRow(distributed_note)
+        self.thermal_source_scroll_area = QScrollArea()
+        self.thermal_source_scroll_area.setWidgetResizable(True)
+        self.thermal_source_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.thermal_source_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.thermal_source_scroll_area.setWidget(source_box)
+        top_splitter.addWidget(self.thermal_source_scroll_area)
+
+        params_box = QGroupBox("Lumped Thermal RC Parameters")
+        params_form = QFormLayout(params_box)
+        self.thermal_rth = _line_edit("1.5", "Thermal resistance to ambient [K/W].")
+        self.thermal_cth = _line_edit("300", "Thermal capacitance [J/K].")
+        self.thermal_ambient_temp = _line_edit("20", "Ambient temperature [deg C].")
+        self.thermal_initial_temp = _line_edit("20", "Initial temperature [deg C].")
+        self.thermal_target_temp = _line_edit("80", "Exceed temperature limit [deg C].")
+        self.thermal_duration_s = _line_edit("900", "Thermal simulation duration [s].")
+        self.thermal_time_step_s = _line_edit("1", "Thermal simulation time step [s].")
+        self.thermal_hotspot_start_m = _line_edit("0.10", "Hot-spot start position from Match Output [m].")
+        self.thermal_hotspot_end_m = _line_edit("0.20", "Hot-spot end position from Match Output [m].")
+        self.thermal_section_combo = QComboBox()
+        self.thermal_user_power_w = _line_edit("50", "User-entered heating power for what-if analysis [W].")
+
+        self.thermal_rth_status = QLabel("ASSUMED / INITIAL ESTIMATE")
+        self.thermal_cth_status = QLabel("ASSUMED / INITIAL ESTIMATE")
+        self.thermal_rth_status.setStyleSheet("color:#facc15;")
+        self.thermal_cth_status.setStyleSheet("color:#facc15;")
+
+        params_form.addRow("Thermal Resistance R_th [K/W]", self._pair_widget(self.thermal_rth, self.thermal_rth_status))
+        params_form.addRow("Thermal Capacitance C_th [J/K]", self._pair_widget(self.thermal_cth, self.thermal_cth_status))
+        params_form.addRow("Ambient Temperature [deg C]", self.thermal_ambient_temp)
+        params_form.addRow("Initial Temperature [deg C]", self.thermal_initial_temp)
+        params_form.addRow("Exceed Temp limit [deg C]", self.thermal_target_temp)
+        params_form.addRow("Simulation Duration [s]", self.thermal_duration_s)
+        params_form.addRow("Simulation Time Step [s]", self.thermal_time_step_s)
+        params_form.addRow("Hot-Spot Start [m]", self.thermal_hotspot_start_m)
+        params_form.addRow("Hot-Spot End [m]", self.thermal_hotspot_end_m)
+        params_form.addRow("Selected RF Section", self.thermal_section_combo)
+        params_form.addRow("User-Entered Heating Power [W]", self.thermal_user_power_w)
+        self.thermal_params_scroll_area = QScrollArea()
+        self.thermal_params_scroll_area.setWidgetResizable(True)
+        self.thermal_params_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.thermal_params_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.thermal_params_scroll_area.setWidget(params_box)
+        top_splitter.addWidget(self.thermal_params_scroll_area)
+        top_splitter.setStretchFactor(0, 1)
+        top_splitter.setStretchFactor(1, 1)
+        top_splitter.setSizes([700, 900])
+        layout.addWidget(top_splitter, 0)
+
+        self.thermal_estimate_warning = QLabel(
+            "Initial Rth and Cth values are engineering estimates for exploratory simulation. "
+            "Replace or calibrate them with measured thermal data for quantitative temperature prediction."
+        )
+        self.thermal_estimate_warning.setWordWrap(True)
+        self.thermal_estimate_warning.setStyleSheet("color:#f87171;")
+        layout.addWidget(self.thermal_estimate_warning)
+
+        self.thermal_summary_label = QLabel("Run RF analysis to compute thermal response.")
+        self.thermal_summary_label.setStyleSheet("color:#93c5fd;")
+        self.thermal_summary_label.setWordWrap(True)
+        layout.addWidget(self.thermal_summary_label)
+
+        self.thermal_canvas = MplCanvas(width=12, height=5, dpi=100)
+        layout.addWidget(self.thermal_canvas, 1)
+
+        self.thermal_model.currentIndexChanged.connect(self._update_thermal_analysis)
+        self.thermal_source_combo.currentIndexChanged.connect(self._on_thermal_source_changed)
+        self.thermal_section_combo.currentIndexChanged.connect(self._update_thermal_analysis)
+        for widget in (
+            self.thermal_rth,
+            self.thermal_cth,
+            self.thermal_ambient_temp,
+            self.thermal_initial_temp,
+            self.thermal_target_temp,
+            self.thermal_duration_s,
+            self.thermal_time_step_s,
+            self.thermal_hotspot_start_m,
+            self.thermal_hotspot_end_m,
+            self.thermal_user_power_w,
+        ):
+            widget.editingFinished.connect(self._update_thermal_analysis)
+
+    def _refresh_thermal_source_options(self, result: CableAnalysisResult) -> None:
+        previous_text = self.thermal_source_combo.currentText()
+        available = [item for item in available_heating_sources(result) if item.enabled]
+        self.thermal_source_combo.blockSignals(True)
+        self.thermal_source_combo.clear()
+        for item in available:
+            self.thermal_source_combo.addItem(item.source.value, item.source)
+        if previous_text:
+            index = self.thermal_source_combo.findText(previous_text)
+            if index >= 0:
+                self.thermal_source_combo.setCurrentIndex(index)
+        if self.thermal_source_combo.currentIndex() < 0:
+            default_text = ThermalHeatingSource.FLEXIBLE_CABLE_TOTAL_DISSIPATION.value
+            default_index = self.thermal_source_combo.findText(default_text)
+            self.thermal_source_combo.setCurrentIndex(default_index if default_index >= 0 else 0)
+        self.thermal_source_combo.blockSignals(False)
+        if result.connector_loss_w is None:
+            self.thermal_connector_status.setText("Connector Dissipation: NOT MODELED")
+        else:
+            self.thermal_connector_status.setText(f"Connector Dissipation: {result.connector_loss_w:.2f} W (RF-derived)")
+
+        section_names = sorted({str(name) for name in result.section_name})
+        previous_section = self.thermal_section_combo.currentText()
+        self.thermal_section_combo.blockSignals(True)
+        self.thermal_section_combo.clear()
+        self.thermal_section_combo.addItems(section_names)
+        section_idx = self.thermal_section_combo.findText(previous_section)
+        if section_idx >= 0:
+            self.thermal_section_combo.setCurrentIndex(section_idx)
+        self.thermal_section_combo.blockSignals(False)
+
+    def _on_thermal_source_changed(self) -> None:
+        source = self._selected_thermal_source()
+        user_input = source == ThermalHeatingSource.USER_ENTERED_HEATING_POWER
+        hotspot = source == ThermalHeatingSource.SELECTED_HOT_SPOT_REGION
+        section = source == ThermalHeatingSource.SELECTED_RF_SECTION
+        self.thermal_user_power_w.setEnabled(user_input)
+        self.thermal_hotspot_start_m.setEnabled(hotspot)
+        self.thermal_hotspot_end_m.setEnabled(hotspot)
+        self.thermal_section_combo.setEnabled(section)
+        self._update_thermal_analysis()
+
+    def _selected_thermal_source(self) -> ThermalHeatingSource:
+        data = self.thermal_source_combo.currentData()
+        if isinstance(data, ThermalHeatingSource):
+            return data
+        return ThermalHeatingSource(self.thermal_source_combo.currentText())
+
+    def _collect_thermal_request(self) -> ThermalRequest:
+        model_data = self.thermal_model.currentData()
+        model = model_data if isinstance(model_data, ThermalModel) else ThermalModel.LUMPED_RC
+        source = self._selected_thermal_source()
+        thermal_inputs = ThermalInputs(
+            r_th_k_per_w=float(self.thermal_rth.text()),
+            c_th_j_per_k=float(self.thermal_cth.text()),
+            ambient_temp_c=float(self.thermal_ambient_temp.text()),
+            initial_temp_c=float(self.thermal_initial_temp.text()),
+            target_temp_c=float(self.thermal_target_temp.text()),
+            duration_s=float(self.thermal_duration_s.text()),
+            time_step_s=float(self.thermal_time_step_s.text()),
+        )
+        region = ThermalRegionSelection(
+            start_m=float(self.thermal_hotspot_start_m.text()),
+            end_m=float(self.thermal_hotspot_end_m.text()),
+            section_name=self.thermal_section_combo.currentText().strip() or None,
+        )
+        user_power: float | None = None
+        if self.thermal_user_power_w.text().strip():
+            user_power = float(self.thermal_user_power_w.text())
+        return ThermalRequest(
+            model=model,
+            heating_source=source,
+            thermal_inputs=thermal_inputs,
+            region=region,
+            user_entered_heating_power_w=user_power,
+        )
+
+    def _reset_thermal_output(self, message: str) -> None:
+        self.last_thermal_result = None
+        if not hasattr(self, "thermal_summary_label"):
+            return
+        self.thermal_summary_label.setText(message)
+        self.thermal_rf_heating_power.setText("RF-DERIVED HEATING POWER\n- W")
+        self.thermal_heating_source_origin.setText("Source: RF Cable Analysis")
+        self.thermal_source_detail.setText("Thermal source: -")
+        self.thermal_canvas.figure.clear()
+        self.thermal_canvas.draw_idle()
+
+    def _update_thermal_analysis(self) -> None:
+        if not getattr(self, "_ui_ready", False):
+            return
+        if self.last_result is None:
+            self._reset_thermal_output("Run RF analysis to compute thermal response.")
+            return
+        result = self.last_result
+        self._refresh_thermal_source_options(result)
+        source = self._selected_thermal_source()
+        self.thermal_user_power_w.setEnabled(source == ThermalHeatingSource.USER_ENTERED_HEATING_POWER)
+        self.thermal_hotspot_start_m.setEnabled(source == ThermalHeatingSource.SELECTED_HOT_SPOT_REGION)
+        self.thermal_hotspot_end_m.setEnabled(source == ThermalHeatingSource.SELECTED_HOT_SPOT_REGION)
+        self.thermal_section_combo.setEnabled(source == ThermalHeatingSource.SELECTED_RF_SECTION)
+        try:
+            request = self._collect_thermal_request()
+            validation = validate_thermal_request(request, result)
+            if not validation.valid:
+                self._reset_thermal_output("Thermal Input Required:\n" + "\n".join(validation.errors))
+                return
+            thermal_result = run_thermal_analysis(request, result)
+            self.last_thermal_result = thermal_result
+            if thermal_result.heating.rf_derived:
+                self.thermal_rf_heating_power.setText(f"RF-DERIVED HEATING POWER\n{thermal_result.heating.power_w:.2f} W")
+            else:
+                self.thermal_rf_heating_power.setText(f"USER-ENTERED HEATING POWER\n{thermal_result.heating.power_w:.2f} W")
+            self.thermal_heating_source_origin.setText(f"Source: {thermal_result.heating.source_origin_label}")
+            self.thermal_source_detail.setText(f"Thermal source: {thermal_result.heating.source_label}")
+            crossing = (
+                f"{thermal_result.target_crossing_time_s:.1f} s"
+                if thermal_result.target_crossing_time_s is not None
+                else "Not reached in simulation window"
+            )
+            warning_text = ("\n" + "\n".join(thermal_result.warnings)) if thermal_result.warnings else ""
+            self.thermal_summary_label.setText(
+                f"Model: {thermal_result.model.value}\n"
+                f"Thermal time constant tau = {thermal_result.thermal_time_constant_s:.2f} s\n"
+                f"Steady-state temperature = {thermal_result.steady_state_temp_c:.2f} deg C\n"
+                f"Target crossing time = {crossing}{warning_text}"
+            )
+            draw_lumped_temperature_plot(self.thermal_canvas, thermal_result, request.thermal_inputs.target_temp_c)
+        except NotImplementedError as exc:
+            self._reset_thermal_output(str(exc))
+        except Exception as exc:
+            self._reset_thermal_output(f"Thermal Input Required / Error: {exc}")
+
     def _build_optimization_tab(self) -> None:
         tab = QWidget()
         self.tabs.addTab(tab, "Z0 Optimization")
@@ -629,6 +883,35 @@ class MainWindow(QMainWindow):
         self.summary_label = QLabel("Run analysis to view summary.")
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
+
+    def _build_feed_image_tab(self, tab_title: str, image_name: str, label_attr_name: str) -> None:
+        tab = QWidget()
+        self.tabs.addTab(tab, tab_title)
+        layout = QVBoxLayout(tab)
+
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setStyleSheet("border:1px solid #334155;")
+
+        image_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+        image_path = image_base / image_name
+        if image_path.exists():
+            pixmap = QPixmap(str(image_path))
+            if not pixmap.isNull():
+                image_label.setPixmap(pixmap)
+            else:
+                image_label.setText(f"Unable to load image: {image_name}")
+        else:
+            image_label.setText(f"Image not found: {image_name}")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(image_label)
+        layout.addWidget(scroll, 1)
+
+        setattr(self, label_attr_name, image_label)
 
     def _toggle_rlgc_fields(self) -> None:
         use_rlgc = self.cable_mode.currentText() == CableModelMode.RLGC.value
@@ -891,6 +1174,8 @@ class MainWindow(QMainWindow):
         return system, cable, chamber, connector
 
     def recalculate(self) -> None:
+        if not getattr(self, "_ui_ready", False):
+            return
         try:
             self._analysis_call_count += 1
             system, cable, chamber, connector = self._collect_models()
@@ -899,6 +1184,7 @@ class MainWindow(QMainWindow):
                 self.system_diag.setText("Input Required:\n" + "\n".join(valid.errors))
                 self.last_result = None
                 self.live_metrics_label.setText(self._format_live_metrics(None, system))
+                self._reset_thermal_output("Run RF analysis to compute thermal response.")
                 self._focus_invalid_input(valid.errors[0] if valid.errors else "")
                 return
             self._clear_invalid_highlight()
@@ -926,10 +1212,12 @@ class MainWindow(QMainWindow):
             self._update_smith_chart_full()
             self._update_summary(result, system)
             self._refresh_probe_table()
+            self._update_thermal_analysis()
         except Exception as exc:
             self.last_result = None
             self.system_diag.setText(f"Input Required / Error: {exc}")
             self.live_metrics_label.setText(self._format_live_metrics(None, None))
+            self._reset_thermal_output("Run RF analysis to compute thermal response.")
             if hasattr(self, "smith_canvas"):
                 self.smith_canvas.clear_chart()
 

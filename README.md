@@ -4,8 +4,9 @@ RF Cable Optimizer is a PySide6 desktop application for match-to-chamber RF cabl
 
 ## Features
 
-- System input, cable analysis, voltage/current distribution, and engineering summary tabs
+- System input, cable analysis, voltage/current distribution, thermal analysis, and engineering summary tabs
 - Cable attenuation and RLGC modeling
+- Lumped thermal RC analysis with RF-derived heating power sources
 - Z0 optimization sweeps with plots and CSV export
 - Coax geometry helper calculations
 - Startup splash screen with:

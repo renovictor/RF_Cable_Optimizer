@@ -173,6 +173,11 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertIn("Not Available", self.window.min_impedance_point_label.text())
         self.assertIn("Not Available", self.window.max_current_point_label.text())
 
+    def test_top_and_bottom_feed_tabs_exist(self) -> None:
+        tab_names = [self.window.tabs.tabText(i) for i in range(self.window.tabs.count())]
+        self.assertIn("Top feed", tab_names)
+        self.assertIn("Bottom feed", tab_names)
+
 
 if __name__ == "__main__":
     unittest.main()

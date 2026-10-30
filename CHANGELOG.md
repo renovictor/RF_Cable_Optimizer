@@ -1,5 +1,22 @@
 # Changelog
 
+## V2026.10.7 - 2026-10-31
+
+- Added a new **Thermal Analysis** tab with a standalone thermal module architecture:
+  - `thermal/models.py` (thermal data models/enums)
+  - `thermal/engine.py` (heating-source resolution + lumped RC solver)
+  - `thermal/validation.py` (thermal-input validation)
+  - `gui/thermal_plot.py` (thermal plotting)
+- Implemented lumped thermal RC analysis driven by RF-derived dissipation, including dynamic heating-source selection and connector-loss availability rules.
+- Added required thermal UX labeling/warnings (RF-derived heating source display, assumption labels for Rth/Cth, and estimate warning text).
+- Added thermal tab relayout with independent vertical scroll areas for:
+  - Thermal Heating Source panel
+  - Lumped Thermal RC Parameters panel
+- Added two new tabs:
+  - **Top feed** (displays `Top_feed.png`)
+  - **Bottom feed** (displays `Bottom_feed.png`)
+- Added/updated automated tests for thermal engine behavior, thermal GUI behavior, and new feed-tab presence.
+
 ## V2026.10.6 - 2026-10-31
 
 - Added scrollable Cable Analysis sub-panels with targeted layout refinements: dedicated scrolling for Power Flow, Critical-Point Cards, Smith Chart Summary, Probe Impedance Details, and cable-input area horizontal scrolling support.
