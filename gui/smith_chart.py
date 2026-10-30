@@ -34,6 +34,9 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._gamma = _nan_complex_array(0)
         self._z_positions = np.array([], dtype=float)
         self._line_collection: LineCollection | None = None
+        self._connector_collection: LineCollection | None = None
+        self._cable_collection: LineCollection | None = None
+        self._interface_artist = None
         self._probe_artist = None
         self._endpoint_match = None
         self._endpoint_load = None
@@ -52,6 +55,9 @@ class SmithChartCanvas(FigureCanvasQTAgg):
     def _build_static_grid(self) -> None:
         self.ax.clear()
         self._line_collection = None
+        self._connector_collection = None
+        self._cable_collection = None
+        self._interface_artist = None
         self._probe_artist = None
         self._endpoint_match = None
         self._endpoint_load = None
@@ -155,6 +161,56 @@ class SmithChartCanvas(FigureCanvasQTAgg):
                 )
 
         self.ax.set_title(title or "Cable Position Trajectory")
+
+    def set_segmented_trajectory(
+        self, gamma_values: np.ndarray, cable_positions: np.ndarray, interface_index: int | None, title: str = ""
+    ) -> None:
+        self._gamma = np.asarray(gamma_values, dtype=np.complex128)
+        self._z_positions = np.asarray(cable_positions, dtype=float)
+        self._build_static_grid()
+        if interface_index is None or interface_index <= 0 or interface_index >= len(self._gamma):
+            self.set_trajectory(gamma_values, cable_positions, title=title)
+            return
+
+        valid = np.isfinite(self._gamma.real) & np.isfinite(self._gamma.imag)
+        points = np.column_stack((self._gamma.real, self._gamma.imag))
+        connector_end = min(max(interface_index, 1), len(points) - 1)
+
+        def _draw_segment(start: int, end: int, color: str) -> LineCollection | None:
+            segment_points = points[start : end + 1]
+            segment_valid = valid[start : end + 1]
+            if len(segment_points) < 2 or np.count_nonzero(segment_valid) < 2:
+                return None
+            filtered = segment_points[segment_valid]
+            if len(filtered) < 2:
+                return None
+            segments = np.stack([filtered[:-1], filtered[1:]], axis=1)
+            collection = LineCollection(segments, colors=[color], linewidths=2.4, alpha=0.95, zorder=3)
+            self.ax.add_collection(collection)
+            return collection
+
+        self._connector_collection = _draw_segment(0, connector_end, "#8b5cf6")
+        self._cable_collection = _draw_segment(connector_end, len(points) - 1, "#22d3ee")
+
+        interface_gamma = self._gamma[interface_index]
+        if np.isfinite(interface_gamma.real) and np.isfinite(interface_gamma.imag):
+            (self._interface_artist,) = self.ax.plot(
+                [interface_gamma.real],
+                [interface_gamma.imag],
+                marker="o",
+                markersize=6,
+                color="#c4b5fd",
+                markeredgecolor="#111827",
+                zorder=8,
+            )
+            self.ax.text(
+                interface_gamma.real + 0.03,
+                interface_gamma.imag + 0.03,
+                "Flexible Cable Start",
+                color="#ddd6fe",
+                fontsize=8,
+            )
+        self.ax.set_title(title or "Connector + Cable Trajectory")
 
     def set_endpoints(self, match_gamma: complex, load_gamma: complex) -> None:
         if np.isfinite(match_gamma.real) and np.isfinite(match_gamma.imag):
@@ -287,7 +343,7 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         target = np.array([event.x, event.y], dtype=float)
         distances = np.linalg.norm(screen_points - target, axis=1)
         nearest_local = int(np.argmin(distances))
-        if distances[nearest_local] > 10.0:
+        if distances[nearest_local] > 28.0:
             return None
         return int(valid_indices[nearest_local])
 

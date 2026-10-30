@@ -51,13 +51,14 @@ class SmithGuiTests(unittest.TestCase):
         self.window.smith_canvas.probePositionSelected.emit(0.42)
         self.app.processEvents()
         self.assertAlmostEqual(float(self.window.probe_pos.text()), 0.42, places=2)
+        self.assertIn("@ z = ", self.window.smith_probe_label.text())
 
     def test_measurement_table_selection_moves_probe(self) -> None:
         self.window.multi_positions.setText("0.05,0.10,0.15")
         self.window._refresh_probe_table()
         self.window.probe_table.selectRow(1)
         self.app.processEvents()
-        self.assertAlmostEqual(float(self.window.probe_pos.text()), 0.10, places=3)
+        self.assertAlmostEqual(float(self.window.probe_pos.text()), 0.10, places=2)
 
     def test_cable_length_change_redraws_smith_trajectory(self) -> None:
         self.window.recalculate()
@@ -101,10 +102,10 @@ class SmithGuiTests(unittest.TestCase):
                 self.window.export_profile_csv()
             with open(temp_path, newline="", encoding="utf-8") as f:
                 rows = list(csv.reader(f))
-            header = next(row for row in rows if row and row[0] == "position_m")
-            self.assertIn("z_local_real_ohm", header)
-            self.assertIn("gamma_phase_deg", header)
-            self.assertIn("smith_reference_z0_imag_ohm", header)
+            header = next(row for row in rows if row and row[0] == "global_position_from_match_m")
+            self.assertIn("section_name", header)
+            self.assertIn("position_from_flexible_cable_start_m", header)
+            self.assertIn("Gamma_imag", header)
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

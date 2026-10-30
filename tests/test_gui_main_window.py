@@ -153,6 +153,7 @@ class MainWindowGuiTests(unittest.TestCase):
     def test_power_balance_equation_holds(self) -> None:
         self.window.power_source.setCurrentText(MatchOutputPowerSource.CALCULATED.value)
         self.window.match_eff.setText("95")
+        self.window.include_connector.setChecked(False)
         self.window.recalculate()
         assert self.window.last_result is not None
         r = self.window.last_result
@@ -163,7 +164,7 @@ class MainWindowGuiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertIn("LOWEST-IMPEDANCE POINT", self.window.min_impedance_point_label.text())
         self.assertIn("MAXIMUM-CURRENT POINT", self.window.max_current_point_label.text())
-        self.assertIn("z =", self.window.min_impedance_point_label.text())
+        self.assertIn("From Match Output", self.window.min_impedance_point_label.text())
 
     def test_engineering_point_cards_show_not_available_when_current_is_zero(self) -> None:
         self.window.p_match_in_w.setText("0")

@@ -36,6 +36,20 @@ HELP_HTML = """
 <p>Preset selector supports DX7 Existing Cable, COMCRAFT AA-11459, and Custom. AA-11459 uses <b>Velocity Factor = 0.76</b> (manufacturer spec).</p>
 <p>AA-11459 attenuation can be used in MANUFACTURER TABLE ONLY mode (no direct 60 MHz value) or INTERPOLATE BETWEEN PUBLISHED POINTS mode (explicitly labeled INTERPOLATED with source points).</p>
 
+<h2>5A. Scrollable Cable and Connector Specification</h2>
+<p>The left-side specification panel is vertically scrollable. Scrolling only changes the visible GUI area.</p>
+<p>Scrolling does not change RF calculations and does not trigger analysis by itself.</p>
+
+<h2>5B. Match-Side Connector / Transition</h2>
+<p>The model supports three coordinate concepts: Connector Physical Length, Connector Electrical Length, and Flexible Cable Physical Coordinate.</p>
+<p>Implemented connector modes:</p>
+<ul>
+  <li>Coordinate Offset Only: changes coordinate labels only; Smith trajectory and RF solution are unchanged.</li>
+  <li>Transmission-Line Section: includes connector Z0, velocity factor, electrical length, and loss in the RF model.</li>
+</ul>
+<p>Nominal 50 ohm does not automatically guarantee zero real-hardware discontinuity.</p>
+<p>Connector parameters must come from verified specification data or explicit user input.</p>
+
 <h2>6. Cable Analysis</h2>
 <p>Press <b>Run Analysis</b>. Key result cards include Match Output Power, Cable Dissipation, Cable End Delivered Power, Maximum Voltage, Maximum Current, Maximum Local Dissipation, Lowest-Impedance Point, and Maximum-Current Point.</p>
 <p>Lowest-impedance point is defined by <code>argmin(|Z(z)|)</code> with <code>Z(z)=V(z)/I(z)</code>, not by reactance crossing alone.</p>

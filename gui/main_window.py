@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QSlider,
     QTabWidget,
@@ -34,10 +35,13 @@ from analysis.cable_analysis import CURRENT_EPSILON_A, CableAnalysisResult, anal
 from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
 from gui.help_window import HelpWindow
 from gui.plots import MplCanvas
+from gui.cable_spec_panel import CableSpecificationPanel
+from gui.focus_widgets import FocusWheelComboBox
 from gui.smith_chart import SmithChartCanvas
 from models.cable_presets import AA11459_ATTENUATION_DB_PER_100FT, AA11459_POWER_RATING_KW, interpolate_log_frequency
 from models.cable_parameters import AttenuationUnit, CableModelMode, CableParameters, CableSpecification
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
+from models.connector_parameters import ConnectorModelMode, ConnectorParameters, HistoricalCoordinateReference
 from models.operating_points import find_operating_point
 from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, MatcherModelMode, SystemParameters
 from models.validation import validate_inputs
@@ -73,6 +77,8 @@ class MainWindow(QMainWindow):
         self.last_sweep: SweepResult | None = None
         self.help_window: HelpWindow | None = None
         self._measurement_row_positions: list[float] = []
+        self._analysis_call_count = 0
+        self._last_invalid_widget: QWidget | None = None
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -93,7 +99,19 @@ class MainWindow(QMainWindow):
     def _create_menu_bar(self) -> None:
         menu = self.menuBar()
         file_menu = menu.addMenu("File")
+        analysis_menu = menu.addMenu("Analysis")
+        window_menu = menu.addMenu("Window")
         help_menu = menu.addMenu("Help")
+
+        export_profile_action = QAction("Export Profile CSV", self)
+        export_profile_action.triggered.connect(self.export_profile_csv)
+        file_menu.addAction(export_profile_action)
+        self.export_profile_action = export_profile_action
+
+        export_smith_action = QAction("Export Smith Chart Image", self)
+        export_smith_action.triggered.connect(self.export_smith_chart_image)
+        file_menu.addAction(export_smith_action)
+        self.export_smith_action = export_smith_action
 
         exit_action = QAction("Exit", self)
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
@@ -102,10 +120,28 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
         self.exit_action = exit_action
 
+        run_analysis_action = QAction("Run Analysis", self)
+        run_analysis_action.triggered.connect(self.recalculate)
+        analysis_menu.addAction(run_analysis_action)
+        self.run_analysis_action = run_analysis_action
+
+        self.window_tab_actions: list[QAction] = []
+        for tab_index in range(self.tabs.count()):
+            tab_name = self.tabs.tabText(tab_index)
+            tab_action = QAction(tab_name, self)
+            tab_action.triggered.connect(lambda _checked=False, idx=tab_index: self.tabs.setCurrentIndex(idx))
+            window_menu.addAction(tab_action)
+            self.window_tab_actions.append(tab_action)
+
         help_action = QAction("RF Cable Optimizer Help", self)
         help_action.triggered.connect(self._show_help_window)
         help_menu.addAction(help_action)
         self.help_action = help_action
+
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+        self.about_action = about_action
 
     def _show_help_window(self) -> None:
         if self.help_window is None:
@@ -113,6 +149,19 @@ class MainWindow(QMainWindow):
         self.help_window.show()
         self.help_window.raise_()
         self.help_window.activateWindow()
+
+    def _show_about_dialog(self) -> None:
+        QMessageBox.about(
+            self,
+            "About RF Cable Optimizer",
+            "RF Match-to-Chamber Cable Engineering Analyzer\n"
+            f"Version: {APP_VERSION}\n"
+            "Author: Victor Huang\n"
+            "Date: 2026-10-31\n"
+            "Company: ASM International\n\n"
+            "PySide6 desktop tool for RF cable analysis, Smith Chart visualization, "
+            "distributed voltage/current/power profiling, and engineering diagnostics.",
+        )
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(
@@ -141,7 +190,7 @@ class MainWindow(QMainWindow):
         self.operating_point_combo = QComboBox()
         for power_w in range(100, 1301, 100):
             self.operating_point_combo.addItem(f"{power_w} W")
-        self.operating_point_combo.setCurrentText("1300 W")
+        self.operating_point_combo.setCurrentText("1200 W")
         self.operating_point_combo.currentTextChanged.connect(self._on_operating_point_changed)
         op_layout.addRow("Select Match Input Power:", self.operating_point_combo)
         self.measured_load = QLabel("Load: -")
@@ -155,9 +204,9 @@ class MainWindow(QMainWindow):
         sys_box = QGroupBox("Match Input & Matcher")
         sys = QFormLayout(sys_box)
         self.freq_mhz = _line_edit("60", "System RF frequency in MHz.")
-        self.p_match_in_w = _line_edit("1300", "Real RF power at matcher input reference plane [W].")
+        self.p_match_in_w = _line_edit("1200", "Real RF power at matcher input reference plane [W].")
         self.z_gen = _line_edit("50", "Generator reference impedance [ohm].")
-        self.p_match_out = _line_edit("1300", "Match Output real power at match-output reference plane [W].")
+        self.p_match_out = _line_edit("1200", "Match Output real power at match-output reference plane [W].")
         self.match_eff = _line_edit("70", "Match efficiency [%] when using calculated mode.")
         self.power_source = QComboBox()
         self.power_source.addItems([s.value for s in MatchOutputPowerSource])
@@ -235,108 +284,16 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         self.tabs.addTab(tab, "Cable Analysis")
         layout = QVBoxLayout(tab)
-
-        cable_box = QGroupBox("Cable Parameters")
-        f = QFormLayout(cable_box)
-        self.cable_mode = QComboBox()
-        self.cable_mode.addItems([m.value for m in CableModelMode])
-        self.cable_mode.currentTextChanged.connect(self._toggle_rlgc_fields)
-        self.z0 = _line_edit("50", "Cable characteristic impedance Z0 [ohm], user configurable/sweepable.")
-        self.length = _line_edit("1.03", "Cable physical length [m], z=0 at Match Output.")
-        self.vf = _line_edit("0.76", "Velocity factor [0..1].")
-        self.att = _line_edit("0.6", "Datasheet attenuation value.")
-        self.att_unit = QComboBox()
-        self.att_unit.addItems([u.value for u in AttenuationUnit])
-        self.att_unit.setCurrentText(AttenuationUnit.DB_PER_100FT.value)
-        self.att_mode = QComboBox()
-        self.att_mode.addItems(
-            [
-                "MANUAL ENTRY",
-                "MANUFACTURER TABLE ONLY",
-                "INTERPOLATE BETWEEN PUBLISHED POINTS",
-            ]
-        )
-        self.att_mode.currentTextChanged.connect(self._on_attenuation_mode_changed)
-        self.rp = _line_edit("", "R' [ohm/m]")
-        self.lp = _line_edit("", "L' [H/m]")
-        self.gp = _line_edit("", "G' [S/m]")
-        self.cp = _line_edit("", "C' [F/m]")
-        f.addRow("Cable Model", self.cable_mode)
-        f.addRow("Z0 [ohm]", self.z0)
-        f.addRow("Length [m]", self.length)
-        f.addRow("Velocity Factor", self.vf)
-        f.addRow("Attenuation", self.att)
-        f.addRow("Attenuation Unit", self.att_unit)
-        f.addRow("Attenuation Source", self.att_mode)
-        f.addRow("R' [ohm/m]", self.rp)
-        f.addRow("L' [H/m]", self.lp)
-        f.addRow("G' [S/m]", self.gp)
-        f.addRow("C' [F/m]", self.cp)
-        self.att_info = QLabel("Attenuation source status: USER INPUT")
-        self.att_info.setWordWrap(True)
-        self.att_info.setStyleSheet("color: #facc15;")
-        f.addRow(self.att_info)
-
-        spec_box = QGroupBox("Cable Specification / Preset")
-        s = QFormLayout(spec_box)
-        self.cable_preset = QComboBox()
-        self.cable_preset.addItems(["DX7 Existing Cable", "COMCRAFT AA-11459", "Custom"])
-        self.cable_preset.currentTextChanged.connect(self._on_cable_preset_changed)
-        self.spec_family = _text_line_edit("Unknown / Input Required", "Cable family.")
-        self.spec_model = _text_line_edit("Unknown / Input Required", "Cable model / assembly designation.")
-        self.spec_part = _text_line_edit("Unknown / Input Required", "ASM part number.")
-        self.spec_assembly = _text_line_edit("Unknown / Input Required", "Assembly designation.")
-        self.spec_outer_d = _text_line_edit("Unknown / Input Required", "Cable outer diameter [mm].")
-        self.spec_center_d = _text_line_edit("Unknown / Input Required", "Center conductor diameter [mm].")
-        self.spec_dielectric_d = _text_line_edit("Unknown / Input Required", "Dielectric diameter [mm].")
-        self.spec_center_type = _text_line_edit("Unknown / Input Required", "Center conductor construction.")
-        self.spec_dielectric = _text_line_edit("Unknown / Input Required", "Dielectric material.")
-        self.spec_outer_shield = _text_line_edit("Unknown / Input Required", "Outer shield construction.")
-        self.spec_jacket = _text_line_edit("Unknown / Input Required", "Jacket material.")
-        self.spec_temp_range = _text_line_edit("Unknown / Input Required", "Cable published temperature range.")
-        self.spec_bend_radius = _text_line_edit("Unknown / Input Required", "Minimum bend radius [mm].")
-        self.spec_d_inner = _text_line_edit(
-            "UNKNOWN / INPUT REQUIRED",
-            "D for coax equation is inner diameter of outer conductor; do not fabricate from overall dimensions.",
-        )
-        self.spec_status = QLabel("Status: USER INPUT")
-        self.spec_field_status = QLabel("Field status: USER INPUT")
-        self.spec_field_status.setWordWrap(True)
-        self.spec_field_status.setStyleSheet("color: #a5f3fc;")
-        self.power_rating_panel = QLabel("")
-        self.power_rating_panel.setWordWrap(True)
-        self.power_rating_panel.setStyleSheet("color: #c4b5fd;")
-        self.power_rating_panel.setToolTip(
-            "Equivalent Matched-Line RMS Current is a calculated engineering reference and is not a manufacturer-specified maximum RF current."
-        )
-        s.addRow("Preset", self.cable_preset)
-        s.addRow("Cable Family", self.spec_family)
-        s.addRow("Model", self.spec_model)
-        s.addRow("ASM Part Number", self.spec_part)
-        s.addRow("Assembly", self.spec_assembly)
-        s.addRow("Outer Diameter [mm]", self.spec_outer_d)
-        s.addRow("Center Conductor Diameter [mm]", self.spec_center_d)
-        s.addRow("Dielectric Diameter [mm]", self.spec_dielectric_d)
-        s.addRow("Center Conductor", self.spec_center_type)
-        s.addRow("Dielectric", self.spec_dielectric)
-        s.addRow("Outer Shield", self.spec_outer_shield)
-        s.addRow("Jacket", self.spec_jacket)
-        s.addRow("Cable Published Temperature Range", self.spec_temp_range)
-        s.addRow("Minimum Bend Radius [mm]", self.spec_bend_radius)
-        s.addRow("Outer-Conductor Inner Diameter D [mm]", self.spec_d_inner)
-        s.addRow(self.spec_status)
-        s.addRow(self.spec_field_status)
-        s.addRow("AA-11459 Power Rating", self.power_rating_panel)
-
         cards = QGroupBox("Power Flow")
         cg = QGridLayout(cards)
         self.card_labels: dict[str, QLabel] = {}
         for idx, (title, target, color) in enumerate(
             [
                 ("MATCH INPUT POWER", "match_input", "#3b82f6"),
-                ("MATCH LOSS", "match_loss", "#f59e0b"),
                 ("MATCH OUTPUT POWER", "match_output", "#22d3ee"),
-                ("CABLE DISSIPATION", "cable_loss", "#ef4444"),
+                ("CONNECTOR DISSIPATION", "connector_loss", "#a855f7"),
+                ("FLEXIBLE CABLE INPUT POWER", "flex_input", "#60a5fa"),
+                ("FLEXIBLE CABLE DISSIPATION", "cable_loss", "#ef4444"),
                 ("CABLE END DELIVERED POWER", "chamber", "#22c55e"),
             ]
         ):
@@ -351,20 +308,16 @@ class MainWindow(QMainWindow):
 
         self.stress_metrics_label = QLabel("Run analysis to view max voltage/current/local dissipation.")
         self.stress_metrics_label.setStyleSheet("color:#cbd5e1;")
-        cg.addWidget(self.stress_metrics_label, 3, 0, 1, 3)
         self.current_comparison_label = QLabel(
             "Matched-Line Current: - Arms\n"
             "Simulated Maximum: - Arms\n"
             "Current Enhancement: - x"
         )
         self.current_comparison_label.setStyleSheet("color:#e9d5ff;")
-        cg.addWidget(self.current_comparison_label, 4, 0, 1, 3)
         self.min_impedance_point_label = QLabel("LOWEST-IMPEDANCE POINT\nNot Available")
         self.min_impedance_point_label.setStyleSheet("color:#fdba74; border:1px solid #334155; border-radius:8px; padding:8px;")
-        cg.addWidget(self.min_impedance_point_label, 5, 0, 1, 3)
         self.max_current_point_label = QLabel("MAXIMUM-CURRENT POINT\nNot Available")
         self.max_current_point_label.setStyleSheet("color:#c4b5fd; border:1px solid #334155; border-radius:8px; padding:8px;")
-        cg.addWidget(self.max_current_point_label, 6, 0, 1, 3)
 
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
@@ -372,30 +325,111 @@ class MainWindow(QMainWindow):
         self.live_metrics_label = QLabel(self._format_live_metrics(None, None))
         self.live_metrics_label.setStyleSheet("color:#93c5fd;")
 
-        action_row = QHBoxLayout()
-        self.run_btn_cable = QPushButton("Run Analysis")
-        self.run_btn_cable.clicked.connect(self.recalculate)
-        action_row.addWidget(self.run_btn_cable)
-        self.export_smith_btn = QPushButton("Export Smith Chart Image")
-        self.export_smith_btn.clicked.connect(self.export_smith_chart_image)
-        action_row.addWidget(self.export_smith_btn)
-        action_row.addStretch(1)
+        self.power_flow_scroll_area = QScrollArea()
+        self.power_flow_scroll_area.setWidgetResizable(True)
+        self.power_flow_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.power_flow_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.power_flow_scroll_area.setWidget(cards)
+        self.power_flow_scroll_area.setMinimumHeight(220)
+        layout.addWidget(self.power_flow_scroll_area, 1)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.addWidget(cable_box)
-        left_layout.addWidget(spec_box)
-        left_layout.addWidget(cards)
+
+        sticky_header = QGroupBox("Cable Preset / Run Analysis")
+        sticky_form = QFormLayout(sticky_header)
+        self.cable_preset = FocusWheelComboBox()
+        self.cable_preset.addItems(["DX7 Existing Cable", "COMCRAFT AA-11459", "Custom"])
+        self.cable_preset.currentTextChanged.connect(self._on_cable_preset_changed)
+        self.run_btn_cable = QPushButton("Run Analysis")
+        self.run_btn_cable.clicked.connect(self.recalculate)
+        sticky_form.addRow("Cable Preset", self.cable_preset)
+        sticky_form.addRow(self.run_btn_cable)
+        left_layout.addWidget(sticky_header)
+
+        self.cable_spec_scroll_area = QScrollArea()
+        self.cable_spec_scroll_area.setWidgetResizable(False)
+        self.cable_spec_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.cable_spec_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.cable_spec_panel = CableSpecificationPanel(_line_edit, _text_line_edit, self)
+        self.cable_spec_panel.setMinimumWidth(500)
+        self.cable_spec_scroll_area.setWidget(self.cable_spec_panel)
+        left_layout.addWidget(self.cable_spec_scroll_area, 1)
         left_layout.addWidget(self.warning_label)
-        left_layout.addLayout(action_row)
         left_layout.addWidget(self.live_metrics_label)
+
+        # Backward-compatible widget attributes used across existing logic/tests.
+        self.cable_mode = self.cable_spec_panel.cable_mode
+        self.z0 = self.cable_spec_panel.z0
+        self.length = self.cable_spec_panel.length
+        self.vf = self.cable_spec_panel.vf
+        self.att = self.cable_spec_panel.att
+        self.att_unit = self.cable_spec_panel.att_unit
+        self.att_mode = self.cable_spec_panel.att_mode
+        self.att_info = self.cable_spec_panel.att_info
+        self.rp = self.cable_spec_panel.rp
+        self.lp = self.cable_spec_panel.lp
+        self.gp = self.cable_spec_panel.gp
+        self.cp = self.cable_spec_panel.cp
+        self.spec_family = self.cable_spec_panel.spec_family
+        self.spec_model = self.cable_spec_panel.spec_model
+        self.spec_part = self.cable_spec_panel.spec_part
+        self.spec_assembly = self.cable_spec_panel.spec_assembly
+        self.spec_outer_d = self.cable_spec_panel.spec_outer_d
+        self.spec_center_d = self.cable_spec_panel.spec_center_d
+        self.spec_dielectric_d = self.cable_spec_panel.spec_dielectric_d
+        self.spec_center_type = self.cable_spec_panel.spec_center_type
+        self.spec_dielectric = self.cable_spec_panel.spec_dielectric
+        self.spec_outer_shield = self.cable_spec_panel.spec_outer_shield
+        self.spec_jacket = self.cable_spec_panel.spec_jacket
+        self.spec_temp_range = self.cable_spec_panel.spec_temp_range
+        self.spec_bend_radius = self.cable_spec_panel.spec_bend_radius
+        self.spec_d_inner = self.cable_spec_panel.spec_d_inner
+        self.spec_status = self.cable_spec_panel.spec_status
+        self.spec_field_status = self.cable_spec_panel.spec_field_status
+        self.power_rating_panel = self.cable_spec_panel.power_rating_panel
+
+        connector_panel = self.cable_spec_panel.connector_panel
+        self.include_connector = connector_panel.include_connector
+        self.connector_mode = connector_panel.connector_mode
+        self.connector_model_name = connector_panel.connector_model_name
+        self.connector_length = connector_panel.connector_length
+        self.connector_z0 = connector_panel.connector_z0
+        self.connector_vf = connector_panel.connector_vf
+        self.connector_att = connector_panel.connector_att
+        self.connector_att_unit = connector_panel.connector_att_unit
+        self.connector_ideal_lossless = connector_panel.connector_ideal_lossless
+        self.connector_source_status = connector_panel.connector_source_status
+        self.connector_notes = connector_panel.connector_notes
+        self.connector_metrics = connector_panel.connector_metrics
+
+        self.historical_damage_start = self.cable_spec_panel.historical_damage_start
+        self.historical_damage_end = self.cable_spec_panel.historical_damage_end
+        self.historical_coordinate_reference = self.cable_spec_panel.historical_coordinate_reference
+
+        self.cable_mode.currentTextChanged.connect(self._toggle_rlgc_fields)
+        self.att_mode.currentTextChanged.connect(self._on_attenuation_mode_changed)
+        self.cable_spec_panel.parameterChanged.connect(self.recalculate)
+        self.cable_spec_panel.connectorChanged.connect(self.recalculate)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         self.smith_canvas = SmithChartCanvas(width=7.0, height=7.0, dpi=100)
+        self.smith_canvas.setMinimumHeight(320)
         self.smith_canvas.probePositionSelected.connect(self._on_smith_probe_selected)
         self.smith_canvas.set_hover_formatter(self._format_smith_hover)
-        right_layout.addWidget(self.smith_canvas, 4)
+
+        critical_cards = QGroupBox("Critical-Point Cards")
+        critical_layout = QVBoxLayout(critical_cards)
+        critical_layout.addWidget(self.stress_metrics_label)
+        critical_layout.addWidget(self.current_comparison_label)
+        critical_layout.addWidget(self.min_impedance_point_label)
+        critical_layout.addWidget(self.max_current_point_label)
+        self.critical_cards_scroll_area = QScrollArea()
+        self.critical_cards_scroll_area.setWidgetResizable(True)
+        self.critical_cards_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.critical_cards_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.critical_cards_scroll_area.setWidget(critical_cards)
 
         smith_cards = QGroupBox("Smith Chart Summary")
         sg = QVBoxLayout(smith_cards)
@@ -416,7 +450,11 @@ class MainWindow(QMainWindow):
             widget.setStyleSheet("border:1px solid #334155; border-radius:8px; padding:8px;")
             sg.addWidget(widget)
         sg.addWidget(self.smith_note_label)
-        right_layout.addWidget(smith_cards, 2)
+        self.smith_summary_scroll_area = QScrollArea()
+        self.smith_summary_scroll_area.setWidgetResizable(True)
+        self.smith_summary_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.smith_summary_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.smith_summary_scroll_area.setWidget(smith_cards)
 
         probe_box = QGroupBox("Probe Impedance Details")
         probe_layout = QVBoxLayout(probe_box)
@@ -424,16 +462,41 @@ class MainWindow(QMainWindow):
         self.probe_impedance_label.setWordWrap(True)
         self.probe_impedance_label.setStyleSheet("color:#f8fafc;")
         probe_layout.addWidget(self.probe_impedance_label)
-        right_layout.addWidget(probe_box, 2)
+        self.probe_impedance_scroll_area = QScrollArea()
+        self.probe_impedance_scroll_area.setWidgetResizable(True)
+        self.probe_impedance_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.probe_impedance_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.probe_impedance_scroll_area.setWidget(probe_box)
+
+        center_stack = QWidget()
+        center_stack_layout = QVBoxLayout(center_stack)
+        center_stack_layout.setContentsMargins(0, 0, 0, 0)
+        center_stack_layout.addWidget(self.critical_cards_scroll_area, 1)
+        center_stack_layout.addWidget(self.smith_summary_scroll_area, 1)
+        center_stack_layout.addWidget(self.probe_impedance_scroll_area, 1)
+
+        right_inner_splitter = QSplitter(Qt.Horizontal)
+        right_inner_splitter.addWidget(center_stack)
+        right_inner_splitter.addWidget(self.smith_canvas)
+        right_inner_splitter.setStretchFactor(0, 1)
+        right_inner_splitter.setStretchFactor(1, 1)
+        right_inner_splitter.setSizes([460, 460])
+        right_layout.addWidget(right_inner_splitter, 1)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
-        layout.addWidget(splitter)
+        splitter.setStretchFactor(0, 35)
+        splitter.setStretchFactor(1, 65)
+        left_panel.setMinimumWidth(300)
+        left_panel.setMaximumWidth(420)
+        splitter.setSizes([380, 920])
+        layout.addWidget(splitter, 2)
+        self.export_smith_btn = QPushButton("Export Smith Chart Image")
+        self.export_smith_btn.clicked.connect(self.export_smith_chart_image)
+        layout.addWidget(self.export_smith_btn, alignment=Qt.AlignLeft)
         self._toggle_rlgc_fields()
-        self.cable_preset.setCurrentText("DX7 Existing Cable")
+        self.cable_preset.setCurrentText("COMCRAFT AA-11459")
 
     @staticmethod
     def _pair_widget(left: QWidget, right: QWidget) -> QWidget:
@@ -451,6 +514,9 @@ class MainWindow(QMainWindow):
         probe_row = QHBoxLayout()
         self.probe_pos = _line_edit("0.15", "Probe position from Match Output [m].")
         self.probe_pos.setMaximumWidth(90)
+        self.probe_reference = FocusWheelComboBox()
+        self.probe_reference.addItems(["From Match Output", "From Flexible Cable Start"])
+        self.probe_reference.currentTextChanged.connect(self._on_probe_reference_changed)
         self.probe_slider = QSlider(Qt.Horizontal)
         self.probe_slider.setRange(0, 1000)
         self.probe_slider.setMinimumWidth(380)
@@ -466,6 +532,7 @@ class MainWindow(QMainWindow):
         self.probe_pos.editingFinished.connect(self._on_probe_text)
         probe_row.addWidget(QLabel("Probe Position [m]"))
         probe_row.addWidget(self.probe_pos)
+        probe_row.addWidget(self.probe_reference)
         probe_row.addWidget(self.probe_slider, 3)
         self.probe_values = QLabel("Probe: Input Required")
         probe_row.addWidget(self.probe_values, 2)
@@ -740,7 +807,7 @@ class MainWindow(QMainWindow):
                 self.measured_iout.setText("Measured Iout - Untrusted: -")
         self.recalculate()
 
-    def _collect_models(self) -> tuple[SystemParameters, CableParameters, ChamberParameters]:
+    def _collect_models(self) -> tuple[SystemParameters, CableParameters, ChamberParameters, ConnectorParameters]:
         self._sync_attenuation_from_mode()
         source = MatchOutputPowerSource(self.power_source.currentText())
         matcher_mode = MatcherModelMode(self.matcher_mode.currentText())
@@ -801,18 +868,41 @@ class MainWindow(QMainWindow):
             impedance_real_ohm=float(self.zl_r.text()) if self.zl_r.text().strip() else None,
             impedance_imag_ohm=float(self.zl_x.text()) if self.zl_x.text().strip() else None,
         )
-        return system, cable, chamber
+        connector_mode_text = self.connector_mode.currentText()
+        if not self.include_connector.isChecked():
+            connector_mode = ConnectorModelMode.DISABLED
+        elif connector_mode_text == ConnectorModelMode.TRANSMISSION_LINE.value:
+            connector_mode = ConnectorModelMode.TRANSMISSION_LINE
+        else:
+            connector_mode = ConnectorModelMode.COORDINATE_OFFSET_ONLY
+        connector = ConnectorParameters(
+            enabled=self.include_connector.isChecked(),
+            model_mode=connector_mode,
+            model_name=self.connector_model_name.text(),
+            physical_length_m=float(self.connector_length.text()) if self.connector_length.text().strip() else None,
+            z0_ohm=float(self.connector_z0.text()) if self.connector_z0.text().strip() else None,
+            velocity_factor=float(self.connector_vf.text()) if self.connector_vf.text().strip() else None,
+            attenuation_value=float(self.connector_att.text()) if self.connector_att.text().strip() else None,
+            attenuation_unit=AttenuationUnit(self.connector_att_unit.currentText()),
+            ideal_lossless=self.connector_ideal_lossless.isChecked(),
+            source_status=self.connector_source_status.text(),
+            notes=self.connector_notes.text(),
+        )
+        return system, cable, chamber, connector
 
     def recalculate(self) -> None:
         try:
-            system, cable, chamber = self._collect_models()
-            valid = validate_inputs(system, cable, chamber)
+            self._analysis_call_count += 1
+            system, cable, chamber, connector = self._collect_models()
+            valid = validate_inputs(system, cable, chamber, connector)
             if not valid.valid:
                 self.system_diag.setText("Input Required:\n" + "\n".join(valid.errors))
                 self.last_result = None
                 self.live_metrics_label.setText(self._format_live_metrics(None, system))
+                self._focus_invalid_input(valid.errors[0] if valid.errors else "")
                 return
-            result = analyze_cable(system, cable, chamber)
+            self._clear_invalid_highlight()
+            result = analyze_cable(system, cable, chamber, connector=connector)
             self.last_result = result
             self.system_diag.setText(self._format_consistency_diagnostic(system))
             if system.match_output_power_source == MatchOutputPowerSource.USER and result.match_input_power_w > 0:
@@ -829,9 +919,9 @@ class MainWindow(QMainWindow):
                 probe_requested = float(self.probe_pos.text())
             except ValueError:
                 probe_requested = 0.0
-            probe_clamped = min(max(probe_requested, 0.0), float(result.z_m[-1]))
-            self.probe_pos.setText(f"{probe_clamped:.5f}")
-            self.probe_slider.setValue(int(1000.0 * probe_clamped / result.z_m[-1]))
+            probe_global = self._probe_input_to_global(probe_requested)
+            probe_clamped = min(max(probe_global, 0.0), float(result.z_m[-1]))
+            self._set_probe_display_from_global(probe_clamped)
             self._draw_distribution()
             self._update_smith_chart_full()
             self._update_summary(result, system)
@@ -861,12 +951,20 @@ class MainWindow(QMainWindow):
         vmax_idx = int(np.argmax(np.abs(r.v_rms)))
         wmax_idx = int(np.argmax(r.p_total_loss_w_per_m))
         eta_match = (r.match_output_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
-        eta_cable = (r.chamber_power_w / r.match_output_power_w * 100.0) if r.match_output_power_w > 0 else 0.0
+        cable_ref_power = r.flexible_cable_input_power_w if r.flexible_cable_input_power_w > 0 else r.match_output_power_w
+        eta_cable = (r.chamber_power_w / cable_ref_power * 100.0) if cable_ref_power > 0 else 0.0
         eta_total = (r.chamber_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
         self.card_labels["match_input"].setText(f"MATCH INPUT POWER\n{r.match_input_power_w:.2f} W")
-        self.card_labels["match_loss"].setText(f"MATCH LOSS\n{r.match_loss_w:.2f} W")
         self.card_labels["match_output"].setText(f"MATCH OUTPUT POWER\n{r.match_output_power_w:.2f} W")
-        self.card_labels["cable_loss"].setText(f"CABLE DISSIPATION\n{r.cable_loss_w:.2f} W ({r.cable_loss_percent:.2f}%)")
+        if r.connector_enabled and r.connector_mode == ConnectorModelMode.TRANSMISSION_LINE.value and r.connector_loss_w is not None:
+            self.card_labels["connector_loss"].setText(f"CONNECTOR DISSIPATION\n{r.connector_loss_w:.2f} W")
+            self.card_labels["flex_input"].setText(f"FLEXIBLE CABLE INPUT POWER\n{r.flexible_cable_input_power_w:.2f} W")
+        else:
+            self.card_labels["connector_loss"].setText("CONNECTOR DISSIPATION\nN/A")
+            self.card_labels["flex_input"].setText("FLEXIBLE CABLE INPUT POWER\nN/A")
+        self.card_labels["cable_loss"].setText(
+            f"FLEXIBLE CABLE DISSIPATION\n{r.flexible_cable_total_loss_w:.2f} W ({r.cable_loss_percent:.2f}%)"
+        )
         self.card_labels["chamber"].setText(f"CABLE END DELIVERED POWER\n{r.chamber_power_w:.2f} W")
         self.efficiency_label.setText(
             f"Matcher Efficiency [%]: {eta_match:.2f}\n"
@@ -896,6 +994,7 @@ class MainWindow(QMainWindow):
         self.min_impedance_point_label.setText(self._format_engineering_point_card("LOWEST-IMPEDANCE POINT", r, "min"))
         self.max_current_point_label.setText(self._format_engineering_point_card("MAXIMUM-CURRENT POINT", r, "max"))
         self.live_metrics_label.setText(self._format_live_metrics(r, system))
+        self._update_connector_metrics(r)
 
     def _format_engineering_point_card(self, title: str, r: CableAnalysisResult, point_kind: str) -> str:
         if point_kind == "min":
@@ -914,13 +1013,72 @@ class MainWindow(QMainWindow):
             p_real = r.max_current_real_power_w
         if z_pos is None or z_local is None or z_mag is None or irms is None or vrms is None or p_real is None:
             return f"{title}\nNot Available"
+        idx = int(np.argmin(np.abs(r.global_position_m - z_pos)))
+        section = str(r.section_name[idx])
+        cable_pos = r.position_from_flexible_cable_start_m[idx]
+        cable_pos_txt = (
+            f"From Cable Start: {cable_pos:.3f} m"
+            if np.isfinite(cable_pos)
+            else "From Cable Start: INSIDE CONNECTOR / BEFORE FLEXIBLE CABLE START"
+        )
         return (
             f"{title}\n"
-            f"z = {z_pos:.3f} m\n"
+            f"From Match Output: {z_pos:.3f} m\n"
+            f"Section: {section}\n"
+            f"{cable_pos_txt}\n"
             f"Z = {z_local.real:+.3f}{z_local.imag:+.3f}j ohm  (|Z|={z_mag:.3f} ohm)\n"
             f"R = {z_local.real:.3f} ohm, X = {z_local.imag:.3f} ohm\n"
             f"Irms = {irms:.3f} A, Vrms = {vrms:.3f} V, P = {p_real:.3f} W"
         )
+
+    def _update_connector_metrics(self, r: CableAnalysisResult) -> None:
+        if not hasattr(self, "connector_metrics"):
+            return
+        if not r.connector_enabled:
+            self.connector_metrics.setText("Connector disabled.")
+            return
+        if r.connector_mode == ConnectorModelMode.COORDINATE_OFFSET_ONLY.value:
+            self.connector_metrics.setText(
+                f"Connector Physical Length [m]: {r.connector_length_m:.4f}\n"
+                "COORDINATE OFFSET ONLY\nCONNECTOR RF BEHAVIOR NOT MODELED"
+            )
+            return
+        deg = r.connector_electrical_length_deg
+        wl = r.connector_electrical_length_wavelength
+        delay = r.connector_propagation_delay_ns
+        self.connector_metrics.setText(
+            f"Connector Physical Length [m]: {r.connector_length_m:.4f}\n"
+            f"Connector Electrical Length [deg]: {deg:.3f}\n"
+            f"Connector Electrical Length [wavelength]: {wl:.6f}\n"
+            f"Connector Propagation Delay [ns]: {delay:.6f}"
+        )
+
+    def _clear_invalid_highlight(self) -> None:
+        if self._last_invalid_widget is not None:
+            self._last_invalid_widget.setStyleSheet("")
+            self._last_invalid_widget = None
+
+    def _focus_invalid_input(self, error_message: str) -> None:
+        self._clear_invalid_highlight()
+        widget_map = [
+            ("Connector length", self.connector_length),
+            ("connector mode requires length", self.connector_length),
+            ("Connector Z0", self.connector_z0),
+            ("Connector velocity factor", self.connector_vf),
+            ("Connector attenuation", self.connector_att),
+            ("Cable length", self.length),
+            ("Cable characteristic impedance", self.z0),
+            ("Velocity factor", self.vf),
+            ("Datasheet attenuation", self.att),
+            ("Frequency", self.freq_mhz),
+        ]
+        for key, widget in widget_map:
+            if key.lower() in error_message.lower():
+                self._last_invalid_widget = widget
+                widget.setStyleSheet("border:2px solid #ef4444;")
+                if hasattr(self, "cable_spec_scroll_area"):
+                    self.cable_spec_scroll_area.ensureWidgetVisible(widget)
+                break
 
     def _format_live_metrics(self, r: CableAnalysisResult | None, system: SystemParameters | None) -> str:
         thresholds = (system.thresholds if system is not None else SystemParameters().thresholds)
@@ -974,50 +1132,80 @@ class MainWindow(QMainWindow):
         if self.last_result is None:
             return
         try:
-            z_probe = float(self.probe_pos.text())
+            z_probe = self._probe_input_to_global(float(self.probe_pos.text()))
         except ValueError:
             return
         for ax in axes:
-            ax.axvline(z_probe, color="#facc15", linestyle="--", linewidth=1.2)
+            ax.axvline(z_probe, color="#facc15", linestyle="--", linewidth=1.6, zorder=20)
             if self.last_result.min_impedance_z_m is not None:
-                ax.axvline(self.last_result.min_impedance_z_m, color="#f97316", linestyle=":", linewidth=1.2)
+                ax.axvline(self.last_result.min_impedance_z_m, color="#f97316", linestyle=":", linewidth=1.2, zorder=18)
             if self.last_result.max_current_z_m is not None:
-                ax.axvline(self.last_result.max_current_z_m, color="#a78bfa", linestyle="-.", linewidth=1.2)
+                ax.axvline(self.last_result.max_current_z_m, color="#a78bfa", linestyle="-.", linewidth=1.2, zorder=18)
 
     def _position_index(self, pos_m: float) -> int:
         r = self.last_result
         assert r is not None
         return int(np.argmin(np.abs(r.z_m - pos_m)))
 
+    def _probe_input_to_global(self, probe_value: float) -> float:
+        if self.last_result is None:
+            return probe_value
+        if self.probe_reference.currentText() == "From Flexible Cable Start":
+            return probe_value + self.last_result.cable_start_global_position_m
+        return probe_value
+
+    def _probe_global_to_input(self, global_value: float) -> float:
+        if self.last_result is None:
+            return global_value
+        if self.probe_reference.currentText() == "From Flexible Cable Start":
+            return max(0.0, global_value - self.last_result.cable_start_global_position_m)
+        return global_value
+
+    def _set_probe_display_from_global(self, global_value: float) -> None:
+        if self.last_result is None:
+            return
+        z_clamped = min(max(global_value, 0.0), float(self.last_result.z_m[-1]))
+        probe_value = self._probe_global_to_input(z_clamped)
+        self.probe_pos.setText(f"{probe_value:.5f}")
+        self.probe_slider.setValue(int(1000.0 * z_clamped / self.last_result.z_m[-1]))
+
+    def _on_probe_reference_changed(self, _text: str) -> None:
+        if self.last_result is None:
+            return
+        z_global = float(self.last_result.z_m[-1]) * self.probe_slider.value() / 1000.0
+        self._set_probe_display_from_global(z_global)
+        self._update_probe_readout()
+        self._update_smith_probe_only()
+
     def _on_probe_slider(self, value: int) -> None:
         if self.last_result is None:
             return
         z = self.last_result.z_m[-1] * value / 1000.0
-        self.probe_pos.setText(f"{z:.5f}")
+        self._set_probe_display_from_global(z)
         self._update_probe_readout()
         self._update_smith_probe_only()
+        self._draw_distribution()
 
     def _on_probe_text(self) -> None:
         if self.last_result is None:
             return
         try:
-            z = float(self.probe_pos.text())
+            z = self._probe_input_to_global(float(self.probe_pos.text()))
         except ValueError:
             return
-        z = min(max(z, 0.0), float(self.last_result.z_m[-1]))
-        self.probe_pos.setText(f"{z:.5f}")
-        self.probe_slider.setValue(int(1000.0 * z / self.last_result.z_m[-1]))
+        self._set_probe_display_from_global(z)
         self._update_probe_readout()
         self._update_smith_probe_only()
+        self._draw_distribution()
 
     def _update_probe_readout(self) -> None:
         if self.last_result is None:
             return
-        z = float(self.probe_pos.text())
+        z = self._probe_input_to_global(float(self.probe_pos.text()))
         probe = self._probe_state_at(z)
         r = self.last_result
         self.probe_values.setText(
-            f"Probe {probe['z']:.3f} m | Vrms={probe['vrms']:.2f} V | Irms={probe['irms']:.2f} A | "
+            f"Probe {probe['z']:.3f} m (From Match) | Vrms={probe['vrms']:.2f} V | Irms={probe['irms']:.2f} A | "
             f"P={probe['p']:.2f} W | Local={probe['local']:.3f} W/m | Cum={probe['cum']:.3f} W"
         )
         z_ref = r.z0_reference
@@ -1045,6 +1233,8 @@ class MainWindow(QMainWindow):
         self.probe_impedance_label.setText(
             "DERIVED FROM V(z)/I(z)\n"
             f"Probe Position from Match Output [m]: {probe['z']:.3f}\n"
+            f"Section: {probe['section']}\n"
+            f"Probe Position from Flexible Cable Start [m]: {probe['cable_pos_text']}\n"
             f"Probe Position from Cable End [m]: {float(r.z_m[-1]) - probe['z']:.3f}\n"
             f"Local Impedance Z(z): {z_local.real:+.3f}{z_local.imag:+.3f}j ohm\n"
             f"Resistance R [ohm]: {z_local.real:.3f}\n"
@@ -1082,14 +1272,15 @@ class MainWindow(QMainWindow):
                 z = float(t)
             except ValueError:
                 continue
-            if z < 0 or z > float(r.z_m[-1]):
+            z_global = self._probe_input_to_global(z)
+            if z_global < 0 or z_global > float(r.z_m[-1]):
                 continue
-            idx = self._position_index(z)
+            idx = self._position_index(z_global)
             vrms = np.abs(r.v_rms[idx])
-            self._measurement_row_positions.append(z)
+            self._measurement_row_positions.append(z_global)
             values.append(
                 (
-                    z,
+                    z_global,
                     vrms,
                     2.0 * np.sqrt(2.0) * vrms,
                     np.abs(r.i_rms[idx]),
@@ -1127,6 +1318,9 @@ class MainWindow(QMainWindow):
         pz = float(np.interp(z_probe, r.z_m, r.p_real_w))
         local = float(np.interp(z_probe, r.z_m, r.p_total_loss_w_per_m))
         cum = float(np.interp(z_probe, r.z_m, r.p_cumulative_loss_w))
+        section_index = int(np.argmin(np.abs(r.global_position_m - z_probe)))
+        cable_pos = float(r.position_from_flexible_cable_start_m[section_index])
+        cable_pos_text = f"{cable_pos:.3f}" if np.isfinite(cable_pos) else "INSIDE CONNECTOR / BEFORE CABLE START"
         valid_impedance = (
             np.isfinite(z_local.real)
             and np.isfinite(z_local.imag)
@@ -1144,6 +1338,8 @@ class MainWindow(QMainWindow):
             "local": local,
             "cum": cum,
             "valid_impedance": valid_impedance,
+            "section": str(r.section_name[section_index]),
+            "cable_pos_text": cable_pos_text,
         }
 
     def _format_smith_hover(self, idx: int) -> str:
@@ -1154,8 +1350,13 @@ class MainWindow(QMainWindow):
         z_local = complex(r.z_local_ohm[idx])
         z_norm = complex(r.z_normalized[idx])
         gamma = complex(r.gamma_local[idx])
+        section = str(r.section_name[idx])
+        cable_pos = r.position_from_flexible_cable_start_m[idx]
+        cable_pos_txt = f"{cable_pos:.3f} m" if np.isfinite(cable_pos) else "INSIDE CONNECTOR"
         return (
             f"z={z:.3f} m\n"
+            f"section={section}\n"
+            f"from cable start={cable_pos_txt}\n"
             f"Z={z_local.real:+.3f}{z_local.imag:+.3f}j Ω\n"
             f"z_norm={z_norm.real:+.3f}{z_norm.imag:+.3f}j\n"
             f"Γ={gamma.real:+.4f}{gamma.imag:+.4f}j\n"
@@ -1175,7 +1376,7 @@ class MainWindow(QMainWindow):
     def _update_smith_probe_only(self) -> None:
         if self.last_result is None:
             return
-        probe = self._probe_state_at(float(self.probe_pos.text()))
+        probe = self._probe_state_at(self._probe_input_to_global(float(self.probe_pos.text())))
         self.smith_canvas.set_probe(
             probe["z"],
             probe["gamma"],
@@ -1190,18 +1391,30 @@ class MainWindow(QMainWindow):
             return
         r = self.last_result
         title = f"Cable Position Trajectory at {self._active_frequency_mhz():.3f} MHz"
-        self.smith_canvas.set_trajectory(r.gamma_local, r.z_m, title=title)
+        if r.connector_enabled and r.connector_mode == ConnectorModelMode.TRANSMISSION_LINE.value:
+            self.smith_canvas.set_segmented_trajectory(r.gamma_local, r.z_m, r.connector_interface_index, title=title)
+        else:
+            self.smith_canvas.set_trajectory(r.gamma_local, r.z_m, title=title)
         self.smith_canvas.set_endpoints(complex(r.gamma_local[0]), complex(r.gamma_local[-1]))
         min_impedance_gamma = complex(r.gamma_local[r.min_impedance_index]) if r.min_impedance_index is not None else None
         max_current_gamma = complex(r.gamma_local[r.max_current_index]) if r.max_current_index is not None else None
         self.smith_canvas.set_engineering_markers(min_impedance_gamma, max_current_gamma)
 
         if self._historical_damage_metadata_available():
-            damage_mask = (r.z_m >= 0.10) & (r.z_m <= 0.20)
+            damage_start = self._as_float_or_none(self.historical_damage_start.text()) or 0.10
+            damage_end = self._as_float_or_none(self.historical_damage_end.text()) or 0.20
+            ref = self.historical_coordinate_reference.currentText()
+            if ref == HistoricalCoordinateReference.FROM_FLEXIBLE_CABLE_START.value:
+                damage_start = r.cable_start_global_position_m + damage_start
+                damage_end = r.cable_start_global_position_m + damage_end
+            damage_mask = (r.z_m >= min(damage_start, damage_end)) & (r.z_m <= max(damage_start, damage_end))
             damage_gamma = np.full(r.gamma_local.shape, np.nan + 1j * np.nan, dtype=np.complex128)
             damage_gamma[damage_mask] = r.gamma_local[damage_mask]
             self.smith_canvas.set_historical_region(damage_gamma, enabled=True)
-            self.smith_note_label.setText("Historical Damage Distance: 0.10 m to 0.20 m (Reference Direction Unverified)")
+            self.smith_note_label.setText(
+                f"Historical Damage Distance: {min(damage_start, damage_end):.3f} m to {max(damage_start, damage_end):.3f} m "
+                f"[{ref}]"
+            )
         else:
             self.smith_canvas.set_historical_region(np.array([], dtype=np.complex128), enabled=False)
             self.smith_note_label.setText("")
@@ -1220,6 +1433,11 @@ class MainWindow(QMainWindow):
         z_end = complex(r.z_local_ohm[-1])
         self.smith_match_label.setText(f"MATCH OUTPUT IMPEDANCE\n{z_match.real:+.3f}{z_match.imag:+.3f}j ohm")
         self.smith_end_label.setText(f"CABLE END IMPEDANCE\n{z_end.real:+.3f}{z_end.imag:+.3f}j ohm")
+        if r.connector_enabled and r.connector_mode == ConnectorModelMode.COORDINATE_OFFSET_ONLY.value:
+            self.smith_note_label.setText(
+                (self.smith_note_label.text() + "\n" if self.smith_note_label.text() else "")
+                + "Connector RF behavior not modeled (coordinate offset only)."
+            )
         self._update_smith_measurement_markers()
         self._update_smith_probe_only()
 
@@ -1227,22 +1445,24 @@ class MainWindow(QMainWindow):
         if self.last_result is None:
             return
         z_clamped = min(max(float(z_m), 0.0), float(self.last_result.z_m[-1]))
-        self.probe_pos.setText(f"{z_clamped:.5f}")
-        self.probe_slider.setValue(int(1000.0 * z_clamped / self.last_result.z_m[-1]))
+        self._set_probe_display_from_global(z_clamped)
         self._update_probe_readout()
+        self._update_smith_probe_only()
+        self._draw_distribution()
 
     def _on_probe_table_selection_changed(self) -> None:
         row = self.probe_table.currentRow()
         if row < 0 or row >= len(self._measurement_row_positions) or self.last_result is None:
             return
         z = self._measurement_row_positions[row]
-        self.probe_pos.setText(f"{z:.5f}")
-        self.probe_slider.setValue(int(1000.0 * z / self.last_result.z_m[-1]))
+        self._set_probe_display_from_global(z)
         self._update_probe_readout()
+        self._update_smith_probe_only()
+        self._draw_distribution()
 
     def run_sweep(self) -> None:
         try:
-            system, cable, chamber = self._collect_models()
+            system, cable, chamber, _connector = self._collect_models()
             w = OptimizationWeights(float(self.w_loss.text()), float(self.w_v.text()), float(self.w_i.text()))
             sweep = sweep_z0(
                 system,
@@ -1299,7 +1519,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         r = self.last_result
-        system, cable, chamber = self._collect_models()
+        system, cable, chamber, connector = self._collect_models()
         with Path(path).open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["SECTION", "key", "value"])
@@ -1309,38 +1529,38 @@ class MainWindow(QMainWindow):
                 w.writerow(["cable", k, v])
             for k, v in asdict(chamber).items():
                 w.writerow(["chamber", k, v])
+            for k, v in asdict(connector).items():
+                w.writerow(["connector", k, v])
             w.writerow([])
             w.writerow(
                 [
-                    "position_m",
+                    "global_position_from_match_m",
+                    "section_name",
+                    "section_local_position_m",
+                    "position_from_flexible_cable_start_m",
                     "V_rms",
                     "I_rms",
-                    "P_real_W",
+                    "Net_Power_W",
                     "P_cond_W_per_m",
                     "P_diel_W_per_m",
-                    "P_total_loss_W_per_m",
-                    "P_cumulative_loss_W",
-                    "z_local_real_ohm",
-                    "z_local_imag_ohm",
-                    "z_local_magnitude_ohm",
-                    "z_local_phase_deg",
-                    "z_normalized_real",
-                    "z_normalized_imag",
-                    "gamma_real",
-                    "gamma_imag",
-                    "gamma_magnitude",
-                    "gamma_phase_deg",
-                    "smith_reference_z0_real_ohm",
-                    "smith_reference_z0_imag_ohm",
+                    "Local_Dissipation_W_per_m",
+                    "Cumulative_Dissipation_W",
+                    "Z_real",
+                    "Z_imag",
+                    "Gamma_real",
+                    "Gamma_imag",
                 ]
             )
             for i in range(len(r.z_m)):
                 z_local = complex(r.z_local_ohm[i])
-                z_norm = complex(r.z_normalized[i])
                 gamma = complex(r.gamma_local[i])
+                cable_pos = r.position_from_flexible_cable_start_m[i]
                 w.writerow(
                     [
-                        r.z_m[i],
+                        r.global_position_m[i],
+                        r.section_name[i],
+                        r.section_local_position_m[i],
+                        "" if np.isnan(cable_pos) else cable_pos,
                         float(np.abs(r.v_rms[i])),
                         float(np.abs(r.i_rms[i])),
                         r.p_real_w[i],
@@ -1350,16 +1570,8 @@ class MainWindow(QMainWindow):
                         r.p_cumulative_loss_w[i],
                         z_local.real,
                         z_local.imag,
-                        abs(z_local),
-                        np.degrees(np.angle(z_local)),
-                        z_norm.real,
-                        z_norm.imag,
                         gamma.real,
                         gamma.imag,
-                        abs(gamma),
-                        np.degrees(np.angle(gamma)),
-                        r.z0_reference.real,
-                        r.z0_reference.imag,
                     ]
                 )
 
@@ -1422,19 +1634,21 @@ class MainWindow(QMainWindow):
 
     def _update_summary(self, r: CableAnalysisResult, system: SystemParameters) -> None:
         eta_match = (r.match_output_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
-        eta_cable = (r.chamber_power_w / r.match_output_power_w * 100.0) if r.match_output_power_w > 0 else 0.0
+        cable_ref_power = r.flexible_cable_input_power_w if r.flexible_cable_input_power_w > 0 else r.match_output_power_w
+        eta_cable = (r.chamber_power_w / cable_ref_power * 100.0) if cable_ref_power > 0 else 0.0
         eta_total = (r.chamber_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
         ideal_note = ""
         if "IDEAL MATCHER" in r.match_output_power_source_label:
             ideal_note = "IDEAL MATCHER - NO MATCH LOSS ASSUMED\n\n"
         self.summary_label.setText(
             f"Reference planes:\n"
-            f"Match Input -> Matcher -> Match Output/Cable Input (z=0) -> Chamber (z=L)\n\n"
+            f"Match Input -> Matcher -> Match Output -> Connector/Transition -> Flexible Cable Start -> Cable End/Chamber\n\n"
             f"{ideal_note}"
             f"Match Input Power = {r.match_input_power_w:.3f} W\n"
             f"Match Output Power = {r.match_output_power_w:.3f} W [{r.match_output_power_source_label}]\n"
             f"Match Loss = {r.match_loss_w:.3f} W\n"
-            f"Cable Dissipation Power = {r.cable_loss_w:.3f} W\n"
+            f"Connector Dissipation Power = {r.connector_loss_w if r.connector_loss_w is not None else 'N/A'} W\n"
+            f"Flexible Cable Dissipation Power = {r.flexible_cable_total_loss_w:.3f} W\n"
             f"Cable End Delivered Power = {r.chamber_power_w:.3f} W\n"
             f"Power Balance Error = {r.power_balance_error_w:.6f} W ({r.power_balance_error_percent:.4f}%)\n\n"
             f"Match Efficiency = {eta_match:.3f}%\n"
