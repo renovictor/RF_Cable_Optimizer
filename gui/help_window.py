@@ -103,6 +103,22 @@ HELP_HTML = """
 
 <h2>16. Source Status</h2>
 <p>Interpret status tags carefully: MEASURED, DATASHEET, DERIVED, USER INPUT, ASSUMED/IDEAL, UNTRUSTED.</p>
+
+<h2>17. RF Stress Comparison</h2>
+<p>RF Stress Comparison has three references: <b>MANUFACTURER REFERENCE</b>, <b>IDEAL MATCHED REFERENCE</b>, and <b>ACTUAL DISTRIBUTED RESULT</b>.</p>
+<ol>
+  <li>Ideal Matched Reference represents VSWR = 1.</li>
+  <li>Actual Distributed Result comes from distributed V(z) and I(z).</li>
+  <li>The same net real power can still produce much higher local current and voltage under mismatch.</li>
+  <li>Current Enhancement compares maximum distributed current to ideal matched current at the same Match Output Power.</li>
+  <li>I-squared Stress Index is a relative current-stress reference.</li>
+  <li>I-squared Stress Index is not cable temperature.</li>
+  <li>Manufacturer power rating does not automatically provide an explicit current limit.</li>
+  <li>Cable Stress Map shows spatial distribution of relative current stress.</li>
+  <li>Smith Chart explains local impedance transformation along the cable.</li>
+  <li>Red visualization indicates relative stress, not automatically a verified limit violation.</li>
+  <li>Thermal Analysis uses actual modeled dissipation as heating source, not the stress index.</li>
+</ol>
 """
 
 

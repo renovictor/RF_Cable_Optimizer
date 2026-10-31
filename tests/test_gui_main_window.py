@@ -178,6 +178,33 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertIn("Top feed", tab_names)
         self.assertIn("Bottom feed", tab_names)
 
+    def test_rf_stress_comparison_subtab_exists(self) -> None:
+        subtab_names = [self.window.cable_analysis_subtabs.tabText(i) for i in range(self.window.cable_analysis_subtabs.count())]
+        self.assertIn("Overview", subtab_names)
+        self.assertIn("RF Stress Comparison", subtab_names)
+        self.assertIn("Smith Chart", subtab_names)
+
+    def test_rf_stress_three_reference_columns_are_populated(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        self.assertIn("MANUFACTURER REFERENCE", self.window.manufacturer_ref_label.text())
+        self.assertIn("IDEAL MATCHED REFERENCE", self.window.matched_ref_label.text())
+        self.assertIn("ACTUAL DISTRIBUTED RESULT", self.window.actual_ref_label.text())
+
+    def test_current_enhancement_card_is_populated(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        self.assertIn("CURRENT ENHANCEMENT", self.window.current_enhancement_card.text())
+        self.assertIn("x", self.window.current_enhancement_card.text())
+
+    def test_open_thermal_at_hot_spot_switches_to_thermal_tab(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        self.window.open_thermal_hotspot_btn.click()
+        self.app.processEvents()
+        current_tab = self.window.tabs.tabText(self.window.tabs.currentIndex())
+        self.assertEqual(current_tab, "Thermal Analysis")
+
 
 if __name__ == "__main__":
     unittest.main()

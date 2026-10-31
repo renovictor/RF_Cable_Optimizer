@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
+from matplotlib import colormaps
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QDoubleValidator, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from analysis.cable_analysis import CURRENT_EPSILON_A, CableAnalysisResult, analyze_cable
 from analysis.optimization import OptimizationWeights, SweepResult, sweep_z0
+from analysis.stress_comparison import RFStressComparisonResult, build_stress_comparison_result
 from gui.thermal_plot import draw_lumped_temperature_plot
 from gui.help_window import HelpWindow
 from gui.plots import MplCanvas
@@ -79,6 +81,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 980)
         self._apply_theme()
         self.last_result: CableAnalysisResult | None = None
+        self.last_stress_result: RFStressComparisonResult | None = None
         self.last_thermal_result = None
         self.last_sweep: SweepResult | None = None
         self.help_window: HelpWindow | None = None
@@ -122,6 +125,11 @@ class MainWindow(QMainWindow):
         export_smith_action.triggered.connect(self.export_smith_chart_image)
         file_menu.addAction(export_smith_action)
         self.export_smith_action = export_smith_action
+
+        export_stress_action = QAction("Export RF Stress Dashboard Image", self)
+        export_stress_action.triggered.connect(self.export_rf_stress_dashboard_image)
+        file_menu.addAction(export_stress_action)
+        self.export_stress_action = export_stress_action
 
         exit_action = QAction("Exit", self)
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
@@ -478,20 +486,38 @@ class MainWindow(QMainWindow):
         self.probe_impedance_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.probe_impedance_scroll_area.setWidget(probe_box)
 
-        center_stack = QWidget()
-        center_stack_layout = QVBoxLayout(center_stack)
-        center_stack_layout.setContentsMargins(0, 0, 0, 0)
-        center_stack_layout.addWidget(self.critical_cards_scroll_area, 1)
-        center_stack_layout.addWidget(self.smith_summary_scroll_area, 1)
-        center_stack_layout.addWidget(self.probe_impedance_scroll_area, 1)
+        overview_tab = QWidget()
+        overview_layout = QVBoxLayout(overview_tab)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.addWidget(self.critical_cards_scroll_area, 1)
+        overview_layout.addWidget(self.probe_impedance_scroll_area, 1)
 
+        smith_tab = QWidget()
+        smith_layout = QVBoxLayout(smith_tab)
+        smith_layout.setContentsMargins(0, 0, 0, 0)
         right_inner_splitter = QSplitter(Qt.Horizontal)
-        right_inner_splitter.addWidget(center_stack)
+        right_inner_splitter.addWidget(self.smith_summary_scroll_area)
         right_inner_splitter.addWidget(self.smith_canvas)
         right_inner_splitter.setStretchFactor(0, 1)
         right_inner_splitter.setStretchFactor(1, 1)
-        right_inner_splitter.setSizes([460, 460])
-        right_layout.addWidget(right_inner_splitter, 1)
+        right_inner_splitter.setSizes([420, 520])
+        smith_layout.addWidget(right_inner_splitter, 1)
+
+        self.stress_tab = self._build_rf_stress_tab()
+        self.cable_analysis_subtabs = QTabWidget()
+        self.cable_analysis_subtabs.addTab(overview_tab, "Overview")
+        self.cable_analysis_subtabs.addTab(self.stress_tab, "RF Stress Comparison")
+        self.cable_analysis_subtabs.addTab(smith_tab, "Smith Chart")
+        animation_corner = QWidget()
+        animation_corner_layout = QHBoxLayout(animation_corner)
+        animation_corner_layout.setContentsMargins(0, 0, 0, 0)
+        animation_corner_layout.addWidget(QLabel("Enable Animation"))
+        self.enable_stress_animation = QComboBox()
+        self.enable_stress_animation.addItems(["ON", "OFF"])
+        animation_corner_layout.addWidget(self.enable_stress_animation)
+        self.cable_analysis_subtabs.setCornerWidget(animation_corner, Qt.TopRightCorner)
+        self.cable_analysis_subtabs.setCurrentIndex(2)
+        right_layout.addWidget(self.cable_analysis_subtabs, 1)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
@@ -502,9 +528,15 @@ class MainWindow(QMainWindow):
         left_panel.setMaximumWidth(420)
         splitter.setSizes([380, 920])
         layout.addWidget(splitter, 2)
+        export_row = QHBoxLayout()
         self.export_smith_btn = QPushButton("Export Smith Chart Image")
         self.export_smith_btn.clicked.connect(self.export_smith_chart_image)
-        layout.addWidget(self.export_smith_btn, alignment=Qt.AlignLeft)
+        self.export_stress_btn = QPushButton("Export RF Stress Dashboard Image")
+        self.export_stress_btn.clicked.connect(self.export_rf_stress_dashboard_image)
+        export_row.addWidget(self.export_smith_btn)
+        export_row.addWidget(self.export_stress_btn)
+        export_row.addStretch(1)
+        layout.addLayout(export_row)
         self._toggle_rlgc_fields()
         self.cable_preset.setCurrentText("COMCRAFT AA-11459")
 
@@ -516,6 +548,93 @@ class MainWindow(QMainWindow):
         l.addWidget(left)
         l.addWidget(right)
         return wrapper
+
+    def _build_rf_stress_tab(self) -> QWidget:
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
+        stress_scroll = QScrollArea()
+        stress_scroll.setWidgetResizable(True)
+        stress_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        stress_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.addWidget(QLabel("RF STRESS COMPARISON"))
+
+        columns = QGroupBox("Reference Comparison")
+        columns_layout = QGridLayout(columns)
+        self.manufacturer_ref_label = QLabel("MANUFACTURER REFERENCE\n-")
+        self.matched_ref_label = QLabel("IDEAL MATCHED REFERENCE\n-")
+        self.actual_ref_label = QLabel("ACTUAL DISTRIBUTED RESULT\n-")
+        self.manufacturer_ref_label.setStyleSheet("color:#93c5fd; border:1px solid #334155; border-radius:8px; padding:10px;")
+        self.matched_ref_label.setStyleSheet("color:#4ade80; border:1px solid #334155; border-radius:8px; padding:10px;")
+        self.actual_ref_label.setStyleSheet("color:#fb923c; border:1px solid #334155; border-radius:8px; padding:10px;")
+        columns_layout.addWidget(self.manufacturer_ref_label, 0, 0)
+        columns_layout.addWidget(self.matched_ref_label, 0, 1)
+        columns_layout.addWidget(self.actual_ref_label, 0, 2)
+        layout.addWidget(columns)
+
+        cards = QGroupBox("Enhancement Summary")
+        cards_layout = QGridLayout(cards)
+        self.current_enhancement_card = QPushButton("CURRENT ENHANCEMENT\nNOT AVAILABLE")
+        self.current_enhancement_card.clicked.connect(self._jump_probe_to_max_current)
+        self.current_enhancement_card.setStyleSheet(
+            "color:#fb923c; border:1px solid #7c2d12; border-radius:10px; padding:10px; font-weight:bold;"
+        )
+        self.current_enhancement_card.setToolTip(
+            "Ratio of the maximum distributed RMS current to the ideal matched RMS current at the same Match Output Power."
+        )
+        self.i2_stress_card = QLabel("LOCAL I-SQUARED STRESS INDEX\nNOT AVAILABLE")
+        self.i2_stress_card.setStyleSheet(
+            "color:#f87171; border:1px solid #7f1d1d; border-radius:10px; padding:10px; font-weight:bold;"
+        )
+        self.i2_stress_card.setToolTip(
+            "Square of the current-enhancement ratio. This is a relative local conductor-current stress indicator, not a temperature prediction or manufacturer derating factor."
+        )
+        self.voltage_enhancement_card = QLabel("VOLTAGE ENHANCEMENT\nNOT AVAILABLE")
+        self.voltage_enhancement_card.setStyleSheet(
+            "color:#22d3ee; border:1px solid #155e75; border-radius:10px; padding:10px; font-weight:bold;"
+        )
+        self.voltage_enhancement_card.setToolTip(
+            "Ratio of maximum distributed RMS voltage to ideal matched RMS voltage at the same power."
+        )
+        self.interpretation_label = QLabel("Run analysis to populate RF stress comparison.")
+        self.interpretation_label.setWordWrap(True)
+        self.interpretation_label.setStyleSheet("color:#e2e8f0;")
+        cards_layout.addWidget(self.current_enhancement_card, 0, 0)
+        cards_layout.addWidget(self.i2_stress_card, 0, 1)
+        cards_layout.addWidget(self.voltage_enhancement_card, 0, 2)
+        cards_layout.addWidget(self.interpretation_label, 1, 0, 1, 3)
+        layout.addWidget(cards)
+
+        actions_row = QHBoxLayout()
+        self.open_thermal_hotspot_btn = QPushButton("OPEN THERMAL ANALYSIS AT HOT SPOT")
+        self.open_thermal_hotspot_btn.clicked.connect(self._open_thermal_analysis_at_hot_spot)
+        actions_row.addWidget(self.open_thermal_hotspot_btn)
+        actions_row.addStretch(1)
+        layout.addLayout(actions_row)
+
+        self.stress_bar_canvas = MplCanvas(width=12, height=4.6, dpi=100)
+        self.stress_map_canvas = MplCanvas(width=12, height=9, dpi=100)
+        self.stress_bar_canvas.setMinimumHeight(260)
+        self.stress_map_canvas.setMinimumHeight(720)
+        self._stress_bar_click_cid = self.stress_bar_canvas.mpl_connect("button_press_event", self._on_stress_bar_click)
+        self._stress_map_click_cid = self.stress_map_canvas.mpl_connect("button_press_event", self._on_stress_map_click)
+        layout.addWidget(self.stress_bar_canvas, 1)
+        layout.addWidget(self.stress_map_canvas, 2)
+
+        details = QGroupBox("Critical Point Details")
+        details_layout = QHBoxLayout(details)
+        self.max_current_detail_label = QLabel("MAXIMUM CURRENT POINT\nNot Available")
+        self.min_impedance_detail_label = QLabel("LOWEST-IMPEDANCE POINT\nNot Available")
+        self.max_current_detail_label.setStyleSheet("color:#fdba74; border:1px solid #334155; border-radius:8px; padding:8px;")
+        self.min_impedance_detail_label.setStyleSheet("color:#fda4af; border:1px solid #334155; border-radius:8px; padding:8px;")
+        details_layout.addWidget(self.max_current_detail_label, 1)
+        details_layout.addWidget(self.min_impedance_detail_label, 1)
+        layout.addWidget(details)
+        layout.addStretch(1)
+        stress_scroll.setWidget(content)
+        tab_layout.addWidget(stress_scroll)
+        return tab
 
     def _build_distribution_tab(self) -> None:
         tab = QWidget()
@@ -1173,6 +1292,47 @@ class MainWindow(QMainWindow):
         )
         return system, cable, chamber, connector
 
+    @staticmethod
+    def _safe_windows_filename(name: str) -> str:
+        return (
+            name.replace(":", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+            .replace("*", "_")
+            .replace("?", "_")
+            .replace('"', "_")
+            .replace("<", "_")
+            .replace(">", "_")
+            .replace("|", "_")
+        )
+
+    def _resolve_manufacturer_power_rating(self, frequency_mhz: float) -> tuple[float | None, float | None, bool, str]:
+        if self.cable_preset.currentText().strip() not in ("COMCRAFT AA-11459", "DX7 Existing Cable"):
+            return None, None, False, "NOT DIRECTLY SPECIFIED"
+        points = AA11459_POWER_RATING_KW
+        for point_f_mhz, p_kw in points:
+            if abs(point_f_mhz - frequency_mhz) < 1e-9:
+                return p_kw * 1000.0, point_f_mhz * 1e6, False, "MANUFACTURER SPEC"
+        if self.att_mode.currentText() == "INTERPOLATE BETWEEN PUBLISHED POINTS":
+            try:
+                interp = interpolate_log_frequency(points, frequency_mhz)
+                return interp.value * 1000.0, frequency_mhz * 1e6, True, "INTERPOLATED"
+            except ValueError:
+                return None, None, False, "NOT DIRECTLY SPECIFIED"
+        return None, None, False, "NOT DIRECTLY SPECIFIED"
+
+    def _compute_stress_result(self, analysis_result: CableAnalysisResult) -> RFStressComparisonResult:
+        manufacturer_power, manufacturer_freq_hz, interpolated, rating_status = self._resolve_manufacturer_power_rating(
+            self._active_frequency_mhz()
+        )
+        return build_stress_comparison_result(
+            analysis_result=analysis_result,
+            manufacturer_power_rating_w=manufacturer_power,
+            manufacturer_rating_frequency_hz=manufacturer_freq_hz,
+            manufacturer_value_interpolated=interpolated,
+            manufacturer_rating_status=rating_status,
+        )
+
     def recalculate(self) -> None:
         if not getattr(self, "_ui_ready", False):
             return
@@ -1183,6 +1343,7 @@ class MainWindow(QMainWindow):
             if not valid.valid:
                 self.system_diag.setText("Input Required:\n" + "\n".join(valid.errors))
                 self.last_result = None
+                self.last_stress_result = None
                 self.live_metrics_label.setText(self._format_live_metrics(None, system))
                 self._reset_thermal_output("Run RF analysis to compute thermal response.")
                 self._focus_invalid_input(valid.errors[0] if valid.errors else "")
@@ -1190,6 +1351,7 @@ class MainWindow(QMainWindow):
             self._clear_invalid_highlight()
             result = analyze_cable(system, cable, chamber, connector=connector)
             self.last_result = result
+            self.last_stress_result = self._compute_stress_result(result)
             self.system_diag.setText(self._format_consistency_diagnostic(system))
             if system.match_output_power_source == MatchOutputPowerSource.USER and result.match_input_power_w > 0:
                 derived_eff = 100.0 * result.match_output_power_w / result.match_input_power_w
@@ -1210,11 +1372,13 @@ class MainWindow(QMainWindow):
             self._set_probe_display_from_global(probe_clamped)
             self._draw_distribution()
             self._update_smith_chart_full()
+            self._update_stress_dashboard()
             self._update_summary(result, system)
             self._refresh_probe_table()
             self._update_thermal_analysis()
         except Exception as exc:
             self.last_result = None
+            self.last_stress_result = None
             self.system_diag.setText(f"Input Required / Error: {exc}")
             self.live_metrics_label.setText(self._format_live_metrics(None, None))
             self._reset_thermal_output("Run RF analysis to compute thermal response.")
@@ -1283,6 +1447,204 @@ class MainWindow(QMainWindow):
         self.max_current_point_label.setText(self._format_engineering_point_card("MAXIMUM-CURRENT POINT", r, "max"))
         self.live_metrics_label.setText(self._format_live_metrics(r, system))
         self._update_connector_metrics(r)
+
+    def _jump_probe_to_max_current(self) -> None:
+        if self.last_result is None or self.last_result.max_current_z_m is None:
+            return
+        self._set_probe_display_from_global(float(self.last_result.max_current_z_m))
+        self._update_probe_readout()
+        self._update_smith_probe_only()
+        self._draw_distribution()
+        self._draw_stress_dashboard()
+
+    def _open_thermal_analysis_at_hot_spot(self) -> None:
+        if self.last_result is None:
+            return
+        r = self.last_result
+        hot_idx = int(np.argmax(r.p_total_loss_w_per_m))
+        center = float(r.z_m[hot_idx])
+        span = max(0.01, 0.03 * float(r.z_m[-1]))
+        start = max(0.0, center - span)
+        end = min(float(r.z_m[-1]), center + span)
+        self.thermal_hotspot_start_m.setText(f"{start:.6g}")
+        self.thermal_hotspot_end_m.setText(f"{end:.6g}")
+        target_source = ThermalHeatingSource.SELECTED_HOT_SPOT_REGION.value
+        idx = self.thermal_source_combo.findText(target_source)
+        if idx >= 0:
+            self.thermal_source_combo.setCurrentIndex(idx)
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Thermal Analysis":
+                self.tabs.setCurrentIndex(i)
+                break
+        self._update_thermal_analysis()
+
+    def _on_stress_bar_click(self, event) -> None:
+        if self.last_result is None or event.inaxes is None:
+            return
+        if event.inaxes.get_title() == "MATCHED VS ACTUAL CURRENT":
+            self._jump_probe_to_max_current()
+
+    def _on_stress_map_click(self, event) -> None:
+        if self.last_result is None or event.inaxes is None or event.xdata is None:
+            return
+        title = str(event.inaxes.get_title())
+        if title in (
+            "PHYSICAL CABLE STRESS MAP (Local Current / Matched Current)",
+            "CURRENT PROFILE OVERLAY",
+            "VOLTAGE PROFILE OVERLAY",
+        ):
+            z = float(event.xdata)
+            self._set_probe_display_from_global(z)
+            self._update_probe_readout()
+            self._update_smith_probe_only()
+            self._draw_distribution()
+            self._draw_stress_dashboard()
+
+    def _update_stress_dashboard(self) -> None:
+        if self.last_result is None or self.last_stress_result is None:
+            return
+        r = self.last_result
+        s = self.last_stress_result
+        max_i_idx = int(np.argmax(np.abs(r.i_rms)))
+        max_v_idx = int(np.argmax(np.abs(r.v_rms)))
+        max_loss_idx = int(np.argmax(r.p_total_loss_w_per_m))
+        max_i_section = str(r.section_name[max_i_idx])
+        max_i_cable_pos = r.position_from_flexible_cable_start_m[max_i_idx]
+        max_i_cable_text = (
+            f"{max_i_cable_pos:.3f} m"
+            if np.isfinite(max_i_cable_pos)
+            else "INSIDE CONNECTOR / BEFORE FLEXIBLE CABLE START"
+        )
+        manufacturer_power_text = "NOT DIRECTLY SPECIFIED"
+        manufacturer_eq_text = "NOT AVAILABLE"
+        manufacturer_freq_text = "NOT DIRECTLY SPECIFIED"
+        if s.manufacturer_power_rating_w is not None:
+            manufacturer_power_text = f"{s.manufacturer_power_rating_w:.2f} W ({s.manufacturer_rating_status})"
+        if s.manufacturer_rating_frequency_hz is not None:
+            manufacturer_freq_text = f"{s.manufacturer_rating_frequency_hz / 1e6:.3f} MHz"
+        if s.manufacturer_equivalent_current_rms_a is not None:
+            manufacturer_eq_text = (
+                f"{s.manufacturer_equivalent_current_rms_a:.2f} Arms [DERIVED FROM MANUFACTURER MATCHED-POWER RATING]"
+            )
+        self.manufacturer_ref_label.setText(
+            "MANUFACTURER REFERENCE\n"
+            f"Cable Model: {self.spec_model.text()}\n"
+            f"Cable Z0: {s.reference_z0_ohm:.3f} ohm\n"
+            f"Published Frequency Point: {manufacturer_freq_text}\n"
+            f"Published Power Rating: {manufacturer_power_text}\n"
+            f"Published Attenuation: {self.att.text() or 'NOT DIRECTLY SPECIFIED'} {self.att_unit.currentText()}\n"
+            f"Published Temperature Range: {self.spec_temp_range.text()}\n"
+            f"Equivalent Matched-Line Rated Current: {manufacturer_eq_text}\n"
+            "Equivalent current is derived from matched-power rating. It is not an explicit manufacturer current limit."
+        )
+        self.manufacturer_ref_label.setToolTip(
+            "This is the RMS traveling-wave current corresponding to the stated manufacturer power rating under a matched-line reference. It is not an explicit manufacturer-specified current limit."
+        )
+        self.matched_ref_label.setText(
+            "IDEAL MATCHED REFERENCE\n"
+            f"Match Output Power: {s.match_output_power_w:.2f} W\n"
+            f"Cable Z0: {s.reference_z0_ohm:.3f} ohm\n"
+            "VSWR: 1.00\n"
+            f"Matched RMS Current: {s.matched_current_rms_a:.3f} Arms\n"
+            f"Matched RMS Voltage: {s.matched_voltage_rms_v:.3f} Vrms\n"
+            "Reflection Coefficient: 0\n"
+            "Cable Position Dependence: Uniform reference\n"
+            "This is a reference condition, not the actual transmission-line solution."
+        )
+        self.matched_ref_label.setToolTip("RMS current for an ideal matched line: sqrt(P_match_output / Re(Z0)).")
+        self.actual_ref_label.setText(
+            "ACTUAL DISTRIBUTED RESULT\n"
+            f"Actual Match Output Power: {r.match_output_power_w:.2f} W\n"
+            f"Actual VSWR: {r.vswr:.3f}\n"
+            f"Maximum RMS Current: {s.actual_max_current_rms_a:.3f} A @ {s.actual_max_current_position_m:.3f} m\n"
+            f"Section: {max_i_section}\n"
+            f"Position from Flexible Cable Start: {max_i_cable_text}\n"
+            f"Maximum RMS Voltage: {s.actual_max_voltage_rms_v:.3f} V @ {s.actual_max_voltage_position_m:.3f} m\n"
+            f"Minimum |Z|: {abs(s.minimum_impedance_ohm):.3f} ohm @ {s.minimum_impedance_position_m:.3f} m\n"
+            f"Maximum Local Dissipation: {s.maximum_local_loss_w_per_m:.4f} W/m @ {s.maximum_local_loss_position_m:.3f} m\n"
+            f"Total Cable Dissipation: {r.flexible_cable_total_loss_w:.3f} W\n"
+            f"Cable End Delivered Power: {r.cable_end_delivered_power_w:.3f} W"
+        )
+        self.actual_ref_label.setToolTip("Maximum RMS current calculated along the modeled RF path.")
+        enhancement_text = f"{s.current_enhancement_factor:.2f} x" if np.isfinite(s.current_enhancement_factor) else "NOT AVAILABLE"
+        i2_text = f"{s.current_squared_stress_index:.1f} x" if np.isfinite(s.current_squared_stress_index) else "NOT AVAILABLE"
+        voltage_enh_text = f"{s.voltage_enhancement_factor:.2f} x" if np.isfinite(s.voltage_enhancement_factor) else "NOT AVAILABLE"
+        diff_i = s.actual_max_current_rms_a - s.matched_current_rms_a if np.isfinite(s.matched_current_rms_a) else float("nan")
+        diff_i_text = f"{diff_i:.2f} Arms" if np.isfinite(diff_i) else "NOT AVAILABLE"
+        self.current_enhancement_card.setText(
+            "CURRENT ENHANCEMENT\n"
+            f"{enhancement_text}\n"
+            f"Matched Current: {s.matched_current_rms_a:.2f} Arms\n"
+            f"Actual Maximum Current: {s.actual_max_current_rms_a:.2f} Arms\n"
+            f"Difference: {diff_i_text}"
+        )
+        self.i2_stress_card.setText(
+            "LOCAL I-SQUARED STRESS INDEX\n"
+            f"{i2_text}\n"
+            "Relative current-squared conductor-stress indicator compared with the ideal matched reference.\n"
+            "NOT A MANUFACTURER DERATING FACTOR\nNOT A TEMPERATURE PREDICTION\nNOT A VERIFIED FAILURE LIMIT"
+        )
+        self.voltage_enhancement_card.setText(
+            "VOLTAGE ENHANCEMENT\n"
+            f"{voltage_enh_text}\n"
+            f"Matched Voltage: {s.matched_voltage_rms_v:.2f} Vrms\n"
+            f"Actual Maximum Voltage: {s.actual_max_voltage_rms_v:.2f} Vrms\n"
+            f"Position: {s.actual_max_voltage_position_m:.3f} m"
+        )
+        self.interpretation_label.setText(
+            s.interpretation_text
+            + "\nThis comparison does not represent a manufacturer current limit or a temperature prediction."
+            + (
+                "\nSPATIAL CORRELATION: The calculated maximum-current location overlaps the aligned historical damage region."
+                if self._historical_damage_metadata_available()
+                and (0.10 <= s.actual_max_current_position_m <= 0.20)
+                else ""
+            )
+        )
+
+        max_gamma = complex(r.gamma_local[max_i_idx])
+        local_vswr = vswr_from_gamma(max_gamma)
+        local_vswr_text = f"{local_vswr:.4f}" if np.isfinite(local_vswr) else "N/A"
+        self.max_current_detail_label.setText(
+            "MAXIMUM CURRENT POINT\n"
+            "DERIVED FROM DISTRIBUTED RF MODEL\n"
+            f"Section: {max_i_section}\n"
+            f"Position from Match Output: {s.actual_max_current_position_m:.3f} m\n"
+            f"Position from Flexible Cable Start: {max_i_cable_text}\n"
+            f"Irms: {s.actual_max_current_rms_a:.4f} A\n"
+            f"Ipeak: {np.sqrt(2.0) * s.actual_max_current_rms_a:.4f} A\n"
+            f"Vrms: {float(np.abs(r.v_rms[max_i_idx])):.4f} V\n"
+            f"Local Complex Impedance: {r.z_local_ohm[max_i_idx].real:+.4f}{r.z_local_ohm[max_i_idx].imag:+.4f}j ohm\n"
+            f"|Z|: {float(abs(r.z_local_ohm[max_i_idx])):.4f} ohm\n"
+            f"Gamma: {max_gamma.real:+.4f}{max_gamma.imag:+.4f}j\n"
+            f"Local VSWR: {local_vswr_text}\n"
+            f"Net Real Power: {r.p_real_w[max_i_idx]:.4f} W\n"
+            f"Local Dissipation: {r.p_total_loss_w_per_m[max_i_idx]:.6f} W/m\n"
+            f"Matched Reference Current: {s.matched_current_rms_a:.4f} A\n"
+            f"Current Enhancement: {s.current_enhancement_factor:.4f} x\n"
+            f"I-squared Stress Index: {s.current_squared_stress_index:.4f} x"
+        )
+
+        min_idx = int(r.min_impedance_index) if r.min_impedance_index is not None else None
+        if min_idx is None:
+            self.min_impedance_detail_label.setText("LOWEST-IMPEDANCE POINT\nNot Available")
+        else:
+            min_z = complex(r.z_local_ohm[min_idx])
+            dist_from_max = abs(float(r.z_m[min_idx]) - float(r.z_m[max_i_idx]))
+            self.min_impedance_detail_label.setText(
+                "LOWEST-IMPEDANCE POINT\n"
+                f"Position: {float(r.z_m[min_idx]):.3f} m\n"
+                f"Section: {str(r.section_name[min_idx])}\n"
+                f"Z = {min_z.real:+.4f}{min_z.imag:+.4f}j ohm\n"
+                f"|Z| = {abs(min_z):.4f} ohm\n"
+                f"Impedance Phase: {np.degrees(np.angle(min_z)):.2f} deg\n"
+                f"Vrms: {float(np.abs(r.v_rms[min_idx])):.4f} V\n"
+                f"Irms: {float(np.abs(r.i_rms[min_idx])):.4f} A\n"
+                f"Net Power: {float(r.p_real_w[min_idx]):.4f} W\n"
+                f"Local Dissipation: {float(r.p_total_loss_w_per_m[min_idx]):.6f} W/m\n"
+                f"Distance from Maximum-Current Point: {dist_from_max:.4f} m"
+            )
+        self._draw_stress_dashboard()
 
     def _format_engineering_point_card(self, title: str, r: CableAnalysisResult, point_kind: str) -> str:
         if point_kind == "min":
@@ -1416,6 +1778,178 @@ class MainWindow(QMainWindow):
         fig.tight_layout()
         self.dist_canvas.draw_idle()
 
+    def _draw_stress_dashboard(self) -> None:
+        if self.last_result is None or self.last_stress_result is None:
+            return
+        r = self.last_result
+        s = self.last_stress_result
+        label_box = {"facecolor": "#ffffff", "edgecolor": "#334155", "alpha": 0.88, "pad": 0.25}
+
+        # Shared-scale bars
+        bar_fig = self.stress_bar_canvas.figure
+        bar_fig.clear()
+        bar_axes = bar_fig.subplots(1, 3)
+        current_max = max(s.actual_max_current_rms_a, s.matched_current_rms_a, 1e-9)
+        voltage_max = max(s.actual_max_voltage_rms_v, s.matched_voltage_rms_v, 1e-9)
+        i2_max = max(float(s.current_squared_stress_index), 1.0, 1e-9) if np.isfinite(s.current_squared_stress_index) else 1.0
+
+        bar_axes[0].barh(["Matched RMS Current", "Actual Maximum RMS Current"], [s.matched_current_rms_a, s.actual_max_current_rms_a], color=["#22c55e", "#f97316"])
+        bar_axes[0].set_xlim(0.0, current_max * 1.15)
+        bar_axes[0].set_title("MATCHED VS ACTUAL CURRENT")
+        bar_axes[0].text(s.matched_current_rms_a, 0, f" {s.matched_current_rms_a:.2f} A", va="center", color="#0f172a", fontweight="bold")
+        bar_axes[0].text(s.actual_max_current_rms_a, 1, f" {s.actual_max_current_rms_a:.2f} A", va="center", color="#0f172a", fontweight="bold")
+        bar_axes[0].text(0.01 * current_max, 1.25, f"{s.current_enhancement_factor:.2f} x", color="#9a3412", fontweight="bold")
+
+        bar_axes[1].barh(["Matched RMS Voltage", "Actual Maximum RMS Voltage"], [s.matched_voltage_rms_v, s.actual_max_voltage_rms_v], color=["#22c55e", "#22d3ee"])
+        bar_axes[1].set_xlim(0.0, voltage_max * 1.15)
+        bar_axes[1].set_title("MATCHED VS ACTUAL VOLTAGE")
+        bar_axes[1].text(s.matched_voltage_rms_v, 0, f" {s.matched_voltage_rms_v:.1f} V", va="center", color="#0f172a", fontweight="bold")
+        bar_axes[1].text(s.actual_max_voltage_rms_v, 1, f" {s.actual_max_voltage_rms_v:.1f} V", va="center", color="#0f172a", fontweight="bold")
+        bar_axes[1].text(0.01 * voltage_max, 1.25, f"Enhancement: {s.voltage_enhancement_factor:.2f} x", color="#0c4a6e", fontweight="bold")
+
+        i2_value = s.current_squared_stress_index if np.isfinite(s.current_squared_stress_index) else 0.0
+        bar_axes[2].barh(["Matched Reference", "Actual Maximum"], [1.0, i2_value], color=["#22c55e", "#ef4444"])
+        bar_axes[2].set_xlim(0.0, i2_max * 1.15)
+        bar_axes[2].set_title("LOCAL CURRENT-SQUARED STRESS")
+        bar_axes[2].text(i2_value, 1, f" {i2_value:.1f} x MATCHED REFERENCE", va="center", color="#7f1d1d", fontweight="bold")
+        bar_axes[2].text(
+            0.0,
+            -0.45,
+            "Relative indicator only. This is not an official cable current limit,\nmanufacturer derating factor or cable temperature prediction.",
+            fontsize=7,
+            color="#7f1d1d",
+        )
+        for ax in bar_axes:
+            ax.grid(True, alpha=0.25)
+        bar_fig.tight_layout()
+        self.stress_bar_canvas.draw_idle()
+
+        # Stress map + overlays
+        fig = self.stress_map_canvas.figure
+        fig.clear()
+        axes = fig.subplots(5, 1, sharex=False)
+        z = r.z_m
+        i_abs = np.abs(r.i_rms)
+        v_abs = np.abs(r.v_rms)
+        matched_i = s.matched_current_rms_a if np.isfinite(s.matched_current_rms_a) and s.matched_current_rms_a > 0 else 1e-12
+        matched_v = s.matched_voltage_rms_v if np.isfinite(s.matched_voltage_rms_v) and s.matched_voltage_rms_v > 0 else 1e-12
+        k_i_profile = np.abs(i_abs) / matched_i
+        cmap = colormaps["turbo"]
+
+        # Executive visualization
+        axes[0].set_title("RF CURRENT-STRESS VISUALIZATION")
+        axes[0].plot([z[0], z[-1]], [0.75, 0.75], color="#22c55e", linewidth=10, solid_capstyle="round")
+        axes[0].text(
+            z[0],
+            0.86,
+            f"IDEAL MATCHED | VSWR=1 | I={s.matched_current_rms_a:.2f} A | V={s.matched_voltage_rms_v:.1f} V",
+            color="#14532d",
+            fontweight="bold",
+            bbox=label_box,
+        )
+        norm = (k_i_profile - np.nanmin(k_i_profile)) / max(np.nanmax(k_i_profile) - np.nanmin(k_i_profile), 1e-12)
+        for i in range(len(z) - 1):
+            axes[0].plot(z[i : i + 2], [0.35, 0.35], color=cmap(norm[i]), linewidth=10, solid_capstyle="round")
+        max_i_idx = int(np.argmax(i_abs))
+        axes[0].scatter([z[max_i_idx]], [0.35], marker="*", s=180, color="#fb923c", edgecolor="#111827", zorder=12)
+        axes[0].text(
+            z[0],
+            0.06,
+            f"ACTUAL DISTRIBUTED | VSWR={r.vswr:.3f} | Imax={s.actual_max_current_rms_a:.2f} A | Vmax={s.actual_max_voltage_rms_v:.1f} V | KI={s.current_enhancement_factor:.2f}x | KI^2={s.current_squared_stress_index:.1f}x",
+            color="#9a3412",
+            fontweight="bold",
+            bbox=label_box,
+        )
+        axes[0].set_ylim(0.0, 1.0)
+        axes[0].set_yticks([])
+        axes[0].grid(True, alpha=0.18)
+
+        # Physical stress map
+        axes[1].set_title("PHYSICAL CABLE STRESS MAP (Local Current / Matched Current)")
+        for i in range(len(z) - 1):
+            axes[1].plot(z[i : i + 2], [0.5, 0.5], color=cmap(norm[i]), linewidth=14, solid_capstyle="butt")
+        section_switches = np.flatnonzero(r.section_name[:-1] != r.section_name[1:])
+        for idx in section_switches:
+            axes[1].axvline(float(z[idx]), color="#334155", linestyle="--", linewidth=1.0, alpha=0.7)
+            axes[1].text(float(z[idx]), 0.86, str(r.section_name[idx]), fontsize=8, color="#0f172a", bbox=label_box)
+        min_idx = int(r.min_impedance_index) if r.min_impedance_index is not None else None
+        vmax_idx = int(np.argmax(v_abs))
+        loss_idx = int(np.argmax(r.p_total_loss_w_per_m))
+        axes[1].scatter([z[max_i_idx]], [0.66], marker="*", s=170, color="#f97316", edgecolor="#111827", zorder=13)
+        if min_idx is not None:
+            axes[1].scatter([z[min_idx]], [0.61], marker="^", s=110, color="#fb923c", edgecolor="#111827", zorder=13)
+        axes[1].scatter([z[vmax_idx]], [0.56], marker="D", s=95, color="#22d3ee", edgecolor="#111827", zorder=13)
+        axes[1].scatter([z[loss_idx]], [0.51], marker="o", s=95, color="#ef4444", edgecolor="#111827", zorder=13)
+        try:
+            probe_global = self._probe_input_to_global(float(self.probe_pos.text()))
+            axes[1].scatter([probe_global], [0.46], marker="o", s=80, color="#facc15", edgecolor="#111827", zorder=13)
+        except ValueError:
+            pass
+        if self._historical_damage_metadata_available():
+            axes[1].axvspan(0.10, 0.20, color="#7f1d1d", alpha=0.22)
+        axes[1].set_ylim(0.38, 0.92)
+        axes[1].set_yticks([])
+        axes[1].set_xlabel("Position from Match Output z [m]")
+        axes[1].grid(True, alpha=0.2)
+        sm = np.linspace(np.nanmin(k_i_profile), np.nanmax(k_i_profile), 100)
+        axes[1].text(
+            z[0],
+            0.40,
+            f"VISUALIZATION SCALE (NOT SAFETY LIMITS)  Min={float(np.nanmin(sm)):.2f}  Max={float(np.nanmax(sm)):.2f}",
+            color="#1e3a8a",
+            fontsize=8,
+            fontweight="bold",
+            bbox=label_box,
+        )
+
+        # Current profile
+        axes[2].set_title("CURRENT PROFILE OVERLAY")
+        axes[2].plot(z, i_abs, color="#fb923c", label="Actual I(z)")
+        axes[2].axhline(s.matched_current_rms_a, color="#22c55e", linestyle="--", label="IDEAL MATCHED CURRENT REFERENCE")
+        axes[2].fill_between(z, i_abs, s.matched_current_rms_a, where=(i_abs > s.matched_current_rms_a), color="#fb923c", alpha=0.15)
+        axes[2].axvline(z[max_i_idx], color="#f97316", linestyle="-.", linewidth=1.2)
+        if self._historical_damage_metadata_available():
+            axes[2].axvspan(0.10, 0.20, color="#7f1d1d", alpha=0.18)
+        axes[2].set_ylabel("Irms [A]")
+        axes[2].grid(True, alpha=0.25)
+        axes[2].legend(loc="upper right")
+
+        # Voltage profile
+        axes[3].set_title("VOLTAGE PROFILE OVERLAY")
+        axes[3].plot(z, v_abs, color="#22d3ee", label="Actual V(z)")
+        axes[3].axhline(s.matched_voltage_rms_v, color="#22c55e", linestyle="--", label="IDEAL MATCHED VOLTAGE REFERENCE")
+        axes[3].axvline(z[vmax_idx], color="#22d3ee", linestyle="-.", linewidth=1.2)
+        if min_idx is not None:
+            min_v_idx = int(np.argmin(v_abs))
+            axes[3].axvline(z[min_v_idx], color="#38bdf8", linestyle=":", linewidth=1.0)
+        if self._historical_damage_metadata_available():
+            axes[3].axvspan(0.10, 0.20, color="#7f1d1d", alpha=0.18)
+        axes[3].set_ylabel("Vrms [V]")
+        axes[3].grid(True, alpha=0.25)
+        axes[3].legend(loc="upper right")
+
+        # Power flow chain
+        axes[4].set_title("ACTUAL DISTRIBUTED POWER FLOW")
+        labels = ["Match Input", "Match Loss", "Match Output", "Connector Loss", "Flexible Loss", "Cable End"]
+        values = [
+            r.match_input_power_w,
+            r.match_loss_w,
+            r.match_output_power_w,
+            float(r.connector_loss_w or 0.0),
+            r.flexible_cable_total_loss_w,
+            r.cable_end_delivered_power_w,
+        ]
+        colors = ["#3b82f6", "#fb923c", "#22d3ee", "#a855f7", "#ef4444", "#22c55e"]
+        axes[4].barh(labels, values, color=colors)
+        for idx, val in enumerate(values):
+            pct = (val / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
+            axes[4].text(val, idx, f" {val:.2f} W ({pct:.1f}%)", va="center", color="#0f172a", fontsize=8, fontweight="bold")
+        axes[4].set_xlabel("Power [W]")
+        axes[4].grid(True, alpha=0.25)
+
+        fig.tight_layout()
+        self.stress_map_canvas.draw_idle()
+
     def _draw_probe_markers(self, axes) -> None:
         if self.last_result is None:
             return
@@ -1464,6 +1998,7 @@ class MainWindow(QMainWindow):
         self._set_probe_display_from_global(z_global)
         self._update_probe_readout()
         self._update_smith_probe_only()
+        self._draw_stress_dashboard()
 
     def _on_probe_slider(self, value: int) -> None:
         if self.last_result is None:
@@ -1473,6 +2008,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_stress_dashboard()
 
     def _on_probe_text(self) -> None:
         if self.last_result is None:
@@ -1485,6 +2021,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_stress_dashboard()
 
     def _update_probe_readout(self) -> None:
         if self.last_result is None:
@@ -1544,6 +2081,7 @@ class MainWindow(QMainWindow):
         )
         self.smith_probe_gamma_label.setText(f"PROBE |GAMMA|\n{abs(gamma):.4f}")
         self._draw_distribution()
+        self._draw_stress_dashboard()
 
     def _refresh_probe_table(self) -> None:
         if self.last_result is None:
@@ -1686,7 +2224,16 @@ class MainWindow(QMainWindow):
         self.smith_canvas.set_endpoints(complex(r.gamma_local[0]), complex(r.gamma_local[-1]))
         min_impedance_gamma = complex(r.gamma_local[r.min_impedance_index]) if r.min_impedance_index is not None else None
         max_current_gamma = complex(r.gamma_local[r.max_current_index]) if r.max_current_index is not None else None
-        self.smith_canvas.set_engineering_markers(min_impedance_gamma, max_current_gamma)
+        max_voltage_gamma = complex(r.gamma_local[int(np.argmax(np.abs(r.v_rms)))])
+        max_loss_gamma = complex(r.gamma_local[int(np.argmax(r.p_total_loss_w_per_m))])
+        section_interfaces = [int(idx) for idx in np.flatnonzero(r.section_name[:-1] != r.section_name[1:])]
+        self.smith_canvas.set_engineering_markers(
+            min_impedance_gamma=min_impedance_gamma,
+            max_current_gamma=max_current_gamma,
+            max_voltage_gamma=max_voltage_gamma,
+            max_local_loss_gamma=max_loss_gamma,
+            section_interface_gammas=[complex(r.gamma_local[idx]) for idx in section_interfaces],
+        )
 
         if self._historical_damage_metadata_available():
             damage_start = self._as_float_or_none(self.historical_damage_start.text()) or 0.10
@@ -1737,6 +2284,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_stress_dashboard()
 
     def _on_probe_table_selection_changed(self) -> None:
         row = self.probe_table.currentRow()
@@ -1747,6 +2295,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_stress_dashboard()
 
     def run_sweep(self) -> None:
         try:
@@ -1819,6 +2368,35 @@ class MainWindow(QMainWindow):
                 w.writerow(["chamber", k, v])
             for k, v in asdict(connector).items():
                 w.writerow(["connector", k, v])
+            if self.last_stress_result is not None:
+                s = self.last_stress_result
+                w.writerow([])
+                w.writerow(["SECTION", "key", "value"])
+                w.writerow(["stress_comparison", "match_output_power_w", s.match_output_power_w])
+                w.writerow(["stress_comparison", "reference_z0_ohm", s.reference_z0_ohm])
+                w.writerow(["stress_comparison", "matched_current_rms_a", s.matched_current_rms_a])
+                w.writerow(["stress_comparison", "matched_voltage_rms_v", s.matched_voltage_rms_v])
+                w.writerow(["stress_comparison", "actual_max_current_rms_a", s.actual_max_current_rms_a])
+                w.writerow(["stress_comparison", "actual_max_current_position_m", s.actual_max_current_position_m])
+                w.writerow(["stress_comparison", "actual_max_voltage_rms_v", s.actual_max_voltage_rms_v])
+                w.writerow(["stress_comparison", "actual_max_voltage_position_m", s.actual_max_voltage_position_m])
+                w.writerow(["stress_comparison", "minimum_impedance_magnitude_ohm", abs(s.minimum_impedance_ohm)])
+                w.writerow(["stress_comparison", "minimum_impedance_position_m", s.minimum_impedance_position_m])
+                w.writerow(["stress_comparison", "maximum_local_loss_w_per_m", s.maximum_local_loss_w_per_m])
+                w.writerow(["stress_comparison", "maximum_local_loss_position_m", s.maximum_local_loss_position_m])
+                w.writerow(["stress_comparison", "current_enhancement_factor", s.current_enhancement_factor])
+                w.writerow(["stress_comparison", "voltage_enhancement_factor", s.voltage_enhancement_factor])
+                w.writerow(["stress_comparison", "current_squared_stress_index", s.current_squared_stress_index])
+                w.writerow(["stress_comparison", "manufacturer_power_rating_w", s.manufacturer_power_rating_w])
+                w.writerow(["stress_comparison", "manufacturer_rating_frequency_hz", s.manufacturer_rating_frequency_hz])
+                w.writerow(
+                    [
+                        "stress_comparison",
+                        "manufacturer_equivalent_current_rms_a",
+                        s.manufacturer_equivalent_current_rms_a,
+                    ]
+                )
+                w.writerow(["stress_comparison", "manufacturer_rating_status", s.manufacturer_rating_status])
             w.writerow([])
             w.writerow(
                 [
@@ -1869,21 +2447,24 @@ class MainWindow(QMainWindow):
         freq = self._active_frequency_mhz()
         z0 = self.last_result.z0_reference
         default_name = f"smith_chart_{freq:.3f}MHz_{float(self.last_result.z_m[-1]):.3f}m_{z0.real:.2f}ohm.png"
-        safe_name = (
-            default_name.replace(":", "_")
-            .replace("/", "_")
-            .replace("\\", "_")
-            .replace("*", "_")
-            .replace("?", "_")
-            .replace('"', "_")
-            .replace("<", "_")
-            .replace(">", "_")
-            .replace("|", "_")
-        )
+        safe_name = self._safe_windows_filename(default_name)
         path, _ = QFileDialog.getSaveFileName(self, "Export Smith Chart Image", safe_name, "PNG (*.png)")
         if not path:
             return
         self.smith_canvas.export_png(path)
+
+    def export_rf_stress_dashboard_image(self) -> None:
+        if self.last_result is None:
+            return
+        freq = self._active_frequency_mhz()
+        power = self.last_result.match_output_power_w
+        default_name = f"rf_stress_comparison_{freq:.3f}MHz_{power:.0f}W.png"
+        safe_name = self._safe_windows_filename(default_name)
+        path, _ = QFileDialog.getSaveFileName(self, "Export RF Stress Dashboard Image", safe_name, "PNG (*.png)")
+        if not path:
+            return
+        pixmap = self.stress_tab.grab()
+        pixmap.save(path, "PNG")
 
     def export_sweep_csv(self) -> None:
         if self.last_sweep is None:

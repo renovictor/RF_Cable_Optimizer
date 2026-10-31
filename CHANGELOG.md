@@ -1,5 +1,33 @@
 # Changelog
 
+## V2026.10.8 - 2026-10-31
+
+- Added a major **RF STRESS COMPARISON** dashboard under Cable Analysis with new sub-tabs:
+  - **Overview**
+  - **RF Stress Comparison**
+  - **Smith Chart**
+- Added reusable stress-comparison analysis module:
+  - `analysis/stress_comparison.py`
+  - pure functions for matched-reference/current/voltage enhancement and I-squared stress index
+  - `RFStressComparisonResult` model built from existing distributed RF outputs (no separate RF model)
+- Added highly visual RF stress summaries:
+  - three-column reference comparison (**MANUFACTURER REFERENCE**, **IDEAL MATCHED REFERENCE**, **ACTUAL DISTRIBUTED RESULT**)
+  - shared-scale comparison charts for current, voltage, and local current-squared stress
+  - physical cable stress map with markers and current/voltage overlay profiles
+  - executive RF current-stress visualization and distributed power-flow panel
+- Added synchronization and workflow improvements:
+  - clickable stress elements route to probe/Smith updates
+  - **OPEN THERMAL ANALYSIS AT HOT SPOT** action links RF hot-spot location to thermal source selection
+- Extended exports:
+  - stress-comparison summary fields added to profile CSV export
+  - new **Export RF Stress Dashboard Image** action (PNG, Windows-safe naming)
+- Updated Help content with a dedicated **RF Stress Comparison** section and interpretation/disclaimer guidance.
+- Added/updated automated tests for stress calculations, GUI integration, CSV export coverage, and new cable-analysis sub-tab behavior.
+- UI follow-up polish:
+  - moved animation control to Cable Analysis sub-tab header (top-right)
+  - made RF Stress Comparison panel scrollable so all charts remain visible on smaller windows
+  - improved stress-chart text readability with stronger contrast and label backgrounds.
+
 ## V2026.10.7 - 2026-10-31
 
 - Added a new **Thermal Analysis** tab with a standalone thermal module architecture:

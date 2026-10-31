@@ -93,6 +93,7 @@ class SmithGuiTests(unittest.TestCase):
         assert self.window.help_window is not None
         self.assertFalse(self.window.help_window.isModal())
         self.assertIn("Smith Chart", self.window.help_window.browser.toPlainText())
+        self.assertIn("RF Stress Comparison", self.window.help_window.browser.toPlainText())
 
     def test_profile_csv_includes_smith_columns(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
@@ -106,6 +107,9 @@ class SmithGuiTests(unittest.TestCase):
             self.assertIn("section_name", header)
             self.assertIn("position_from_flexible_cable_start_m", header)
             self.assertIn("Gamma_imag", header)
+            self.assertTrue(
+                any(len(row) >= 2 and row[0] == "stress_comparison" and row[1] == "current_enhancement_factor" for row in rows)
+            )
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

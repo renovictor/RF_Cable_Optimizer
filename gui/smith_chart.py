@@ -42,6 +42,9 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._endpoint_load = None
         self._min_impedance_artist = None
         self._max_current_artist = None
+        self._max_voltage_artist = None
+        self._max_loss_artist = None
+        self._section_interface_artists: list = []
         self._historical_artist = None
         self._measurement_artists: list = []
         self._measurement_labels: list = []
@@ -63,6 +66,9 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._endpoint_load = None
         self._min_impedance_artist = None
         self._max_current_artist = None
+        self._max_voltage_artist = None
+        self._max_loss_artist = None
+        self._section_interface_artists = []
         self._historical_artist = None
         self._measurement_artists = []
         self._measurement_labels = []
@@ -252,7 +258,14 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         )
         self._probe_annotation.set_visible(True)
 
-    def set_engineering_markers(self, min_impedance_gamma: complex | None, max_current_gamma: complex | None) -> None:
+    def set_engineering_markers(
+        self,
+        min_impedance_gamma: complex | None,
+        max_current_gamma: complex | None,
+        max_voltage_gamma: complex | None = None,
+        max_local_loss_gamma: complex | None = None,
+        section_interface_gammas: list[complex] | None = None,
+    ) -> None:
         if min_impedance_gamma is not None and np.isfinite(min_impedance_gamma.real) and np.isfinite(min_impedance_gamma.imag):
             (self._min_impedance_artist,) = self.ax.plot(
                 [min_impedance_gamma.real],
@@ -287,6 +300,55 @@ class SmithChartCanvas(FigureCanvasQTAgg):
                 color="#c4b5fd",
                 fontsize=8,
             )
+        if max_voltage_gamma is not None and np.isfinite(max_voltage_gamma.real) and np.isfinite(max_voltage_gamma.imag):
+            (self._max_voltage_artist,) = self.ax.plot(
+                [max_voltage_gamma.real],
+                [max_voltage_gamma.imag],
+                marker="D",
+                markersize=8,
+                color="#22d3ee",
+                markeredgecolor="#111827",
+                zorder=8,
+            )
+            self.ax.text(
+                max_voltage_gamma.real + 0.03,
+                max_voltage_gamma.imag + 0.03,
+                "Max |V|",
+                color="#67e8f9",
+                fontsize=8,
+            )
+        if max_local_loss_gamma is not None and np.isfinite(max_local_loss_gamma.real) and np.isfinite(max_local_loss_gamma.imag):
+            (self._max_loss_artist,) = self.ax.plot(
+                [max_local_loss_gamma.real],
+                [max_local_loss_gamma.imag],
+                marker="o",
+                markersize=8,
+                color="#ef4444",
+                markeredgecolor="#111827",
+                zorder=8,
+            )
+            self.ax.text(
+                max_local_loss_gamma.real + 0.03,
+                max_local_loss_gamma.imag - 0.05,
+                "Max Loss",
+                color="#fca5a5",
+                fontsize=8,
+            )
+        self._section_interface_artists = []
+        if section_interface_gammas:
+            for gamma in section_interface_gammas:
+                if not (np.isfinite(gamma.real) and np.isfinite(gamma.imag)):
+                    continue
+                (artist,) = self.ax.plot(
+                    [gamma.real],
+                    [gamma.imag],
+                    marker="s",
+                    markersize=5,
+                    color="#e2e8f0",
+                    markeredgecolor="#111827",
+                    zorder=7,
+                )
+                self._section_interface_artists.append(artist)
 
     def set_measurement_markers(self, positions_m: list[float], gamma_values: list[complex]) -> None:
         for artist in self._measurement_artists:
