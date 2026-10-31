@@ -40,8 +40,9 @@ class SystemParameters:
     frequency_mhz: float = 60.0
     match_input_power_w: float = 1300.0
     generator_impedance_ohm: float = 50.0
+    generator_impedance_imag_ohm: float = 0.0
     # Matcher behavior
-    match_efficiency_percent: float = 100.0
+    match_efficiency_percent: float = 70.0
     match_output_power_source: MatchOutputPowerSource = MatchOutputPowerSource.IDEAL
     matcher_model_mode: MatcherModelMode = MatcherModelMode.IDEAL
     # Reference plane: match output / cable input
@@ -56,3 +57,7 @@ class SystemParameters:
     sparam_ref_impedance_ohm: float = 50.0
     sparam_frequency_mhz: float | None = None
     thresholds: WarningThresholds = field(default_factory=WarningThresholds)
+
+    @property
+    def source_impedance(self) -> complex:
+        return complex(self.generator_impedance_ohm, self.generator_impedance_imag_ohm)

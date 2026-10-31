@@ -1,5 +1,18 @@
 # Changelog
 
+## V2026.10.9 - 2026-10-31
+
+- Updated matcher S-parameter workflow UX:
+  - default S-parameter fields preloaded with the current regression dataset
+  - S-parameter calculated mode no longer requires manual efficiency entry
+  - Match Efficiency field now displays computed efficiency in USER S-PARAMETERS + CALCULATED mode
+  - Load R/X display updates with active loaded ZL in non-manual load modes
+- Clarified System Input labels:
+  - `Historical Load R/X` renamed to `Load R/X`
+- Added/updated tests for:
+  - computed efficiency display behavior in S-parameter mode
+  - active ZL-to-Load R/X UI synchronization behavior
+
 ## V2026.10.8 - 2026-10-31
 
 - Added a major **RF STRESS COMPARISON** dashboard under Cable Analysis with new sub-tabs:

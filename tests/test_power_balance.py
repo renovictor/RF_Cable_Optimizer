@@ -7,7 +7,7 @@ import numpy as np
 from analysis.cable_analysis import analyze_cable
 from models.cable_parameters import AttenuationUnit, CableModelMode, CableParameters
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
-from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, SystemParameters
+from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, MatcherModelMode, SystemParameters
 
 
 class PowerBalanceTests(unittest.TestCase):
@@ -173,6 +173,70 @@ class PowerBalanceTests(unittest.TestCase):
         result = analyze_cable(system, cable, chamber)
         self.assertEqual(result.match_output_power_w, result.match_input_power_w)
         self.assertIn("IDEAL MATCHER - NO MATCH LOSS ASSUMED", result.match_output_power_source_label)
+
+    def test_user_sparameter_mode_uses_loaded_zl_not_manual_efficiency(self) -> None:
+        system = SystemParameters(
+            frequency_mhz=60.0,
+            match_input_power_w=1300.0,
+            generator_impedance_ohm=50.0,
+            generator_impedance_imag_ohm=0.0,
+            match_output_power_source=MatchOutputPowerSource.CALCULATED,
+            matcher_model_mode=MatcherModelMode.USER_S,
+            match_efficiency_percent=70.0,
+            match_output_impedance=ComplexImpedance(2.62069, 19.702),
+            s11=complex(-0.817, 0.414),
+            s12=complex(-0.0561, 0.343),
+            s21=complex(-0.0559, 0.343),
+            s22=complex(-0.670, -0.625),
+            sparam_ref_impedance_ohm=50.0,
+            sparam_frequency_mhz=60.0,
+        )
+        cable = CableParameters(
+            z0_ohm=50.0,
+            length_m=1.03,
+            velocity_factor=0.76,
+            attenuation_value=0.0,
+            attenuation_unit=AttenuationUnit.DB_PER_M,
+            model_mode=CableModelMode.DATASHEET,
+        )
+        chamber = ChamberParameters(mode=ChamberImpedanceMode.MEASURED_OR_USER_LOAD)
+        result = analyze_cable(system, cable, chamber)
+        self.assertIn("LOADED TWO-PORT", result.match_output_power_source_label)
+        self.assertNotAlmostEqual(result.match_output_power_w, 910.0, places=1)
+        self.assertIsNotNone(result.matcher_output_impedance_zout)
+        self.assertIsNotNone(result.matcher_input_impedance_zin)
+        self.assertIsNotNone(result.z22_open_circuit_parameter_ohm)
+
+    def test_conjugate_match_mode_sets_zl_from_conjugate_zout(self) -> None:
+        system = SystemParameters(
+            frequency_mhz=60.0,
+            match_input_power_w=1300.0,
+            generator_impedance_ohm=50.0,
+            generator_impedance_imag_ohm=0.0,
+            match_output_power_source=MatchOutputPowerSource.CALCULATED,
+            matcher_model_mode=MatcherModelMode.USER_S,
+            match_output_impedance=ComplexImpedance(1.0, 1.0),
+            s11=complex(-0.817, 0.414),
+            s12=complex(-0.0561, 0.343),
+            s21=complex(-0.0559, 0.343),
+            s22=complex(-0.670, -0.625),
+            sparam_ref_impedance_ohm=50.0,
+            sparam_frequency_mhz=60.0,
+        )
+        cable = CableParameters(
+            z0_ohm=50.0,
+            length_m=1.03,
+            velocity_factor=0.76,
+            attenuation_value=0.0,
+            attenuation_unit=AttenuationUnit.DB_PER_M,
+            model_mode=CableModelMode.DATASHEET,
+        )
+        chamber = ChamberParameters(mode=ChamberImpedanceMode.CONJUGATE_MATCH_TO_ZOUT)
+        result = analyze_cable(system, cable, chamber)
+        assert result.conjugate_zout_target is not None
+        assert result.load_impedance_zl is not None
+        self.assertAlmostEqual(result.load_impedance_zl.real, result.conjugate_zout_target.real, places=6)
+        self.assertAlmostEqual(result.load_impedance_zl.imag, result.conjugate_zout_target.imag, places=6)
 
 
 if __name__ == "__main__":

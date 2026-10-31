@@ -8,7 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
-from models.system_parameters import MatchOutputPowerSource
+from models.chamber_parameters import ChamberImpedanceMode
+from models.system_parameters import MatchOutputPowerSource, MatcherModelMode
 
 
 class MainWindowGuiTests(unittest.TestCase):
@@ -159,6 +160,44 @@ class MainWindowGuiTests(unittest.TestCase):
         r = self.window.last_result
         self.assertAlmostEqual(r.match_input_power_w, r.match_loss_w + r.cable_loss_w + r.chamber_power_w, places=6)
 
+    def test_gui_uses_locked_impedance_terminology_labels(self) -> None:
+        self.assertEqual(self.window.chamber_mode.currentText(), ChamberImpedanceMode.MEASURED_OR_USER_LOAD.value)
+        self.assertIsNotNone(self.window.z_gen_x)
+        self.assertTrue(self.window.p_match_out.isReadOnly())
+
+    def test_load_mode_enables_correct_fields(self) -> None:
+        self.window.chamber_mode.setCurrentText(ChamberImpedanceMode.MEASURED_OR_USER_LOAD.value)
+        self.app.processEvents()
+        self.assertTrue(self.window.zm_r.isEnabled())
+        self.assertFalse(self.window.zl_r.isEnabled())
+        self.window.chamber_mode.setCurrentText(ChamberImpedanceMode.DERIVED_FROM_DOWNSTREAM_PATH.value)
+        self.app.processEvents()
+        self.assertFalse(self.window.zm_r.isEnabled())
+        self.assertTrue(self.window.zl_r.isEnabled())
+        self.window.chamber_mode.setCurrentText(ChamberImpedanceMode.CONJUGATE_MATCH_TO_ZOUT.value)
+        self.app.processEvents()
+        self.assertFalse(self.window.zm_r.isEnabled())
+        self.assertFalse(self.window.zl_r.isEnabled())
+
+    def test_manual_efficiency_is_disabled_in_user_s_calculated_mode(self) -> None:
+        self.window.matcher_mode.setCurrentText(MatcherModelMode.USER_S.value)
+        self.window.power_source.setCurrentText(MatchOutputPowerSource.CALCULATED.value)
+        self.window.recalculate()
+        self.app.processEvents()
+        self.assertFalse(self.window.match_eff.isEnabled())
+        self.assertGreater(float(self.window.match_eff.text()), 0.0)
+
+    def test_load_r_x_fields_update_with_active_zl_in_conjugate_mode(self) -> None:
+        self.window.matcher_mode.setCurrentText(MatcherModelMode.USER_S.value)
+        self.window.power_source.setCurrentText(MatchOutputPowerSource.CALCULATED.value)
+        self.window.chamber_mode.setCurrentText(ChamberImpedanceMode.CONJUGATE_MATCH_TO_ZOUT.value)
+        self.window.recalculate()
+        self.app.processEvents()
+        assert self.window.last_result is not None
+        assert self.window.last_result.load_impedance_zl is not None
+        self.assertAlmostEqual(float(self.window.zm_r.text()), self.window.last_result.load_impedance_zl.real, places=4)
+        self.assertAlmostEqual(float(self.window.zm_x.text()), self.window.last_result.load_impedance_zl.imag, places=4)
+
     def test_engineering_point_cards_are_populated(self) -> None:
         self.window.recalculate()
         self.app.processEvents()
@@ -191,6 +230,27 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertIn("IDEAL MATCHED REFERENCE", self.window.matched_ref_label.text())
         self.assertIn("ACTUAL DISTRIBUTED RESULT", self.window.actual_ref_label.text())
 
+    def test_summary_separates_z22_zout_and_zl_terms(self) -> None:
+        self.window.matcher_mode.setCurrentText(MatcherModelMode.USER_S.value)
+        self.window.power_source.setCurrentText(MatchOutputPowerSource.CALCULATED.value)
+        self.window.chamber_mode.setCurrentText(ChamberImpedanceMode.MEASURED_OR_USER_LOAD.value)
+        self.window.s11r.setText("-0.817")
+        self.window.s11i.setText("0.414")
+        self.window.s12r.setText("-0.0561")
+        self.window.s12i.setText("0.343")
+        self.window.s21r.setText("-0.0559")
+        self.window.s21i.setText("0.343")
+        self.window.s22r.setText("-0.670")
+        self.window.s22i.setText("-0.625")
+        self.window.s_zref.setText("50")
+        self.window.s_freq.setText("60")
+        self.window.recalculate()
+        self.app.processEvents()
+        summary = self.window.summary_label.text()
+        self.assertIn("Z22 Open-Circuit Network Parameter", summary)
+        self.assertIn("Matcher Output Impedance Zout", summary)
+        self.assertIn("Active Load Impedance ZL", summary)
+
     def test_current_enhancement_card_is_populated(self) -> None:
         self.window.recalculate()
         self.app.processEvents()
@@ -204,6 +264,13 @@ class MainWindowGuiTests(unittest.TestCase):
         self.app.processEvents()
         current_tab = self.window.tabs.tabText(self.window.tabs.currentIndex())
         self.assertEqual(current_tab, "Thermal Analysis")
+
+    def test_vpp_diagnostic_is_separate_from_impedance_division(self) -> None:
+        self.window.vpp.setText("500")
+        self.window.recalculate()
+        self.app.processEvents()
+        text = self.window.system_diag.text()
+        self.assertIn("Do not calculate operating load current as Vpp/|Zout| or Vpp/|Z22|", text)
 
 
 if __name__ == "__main__":

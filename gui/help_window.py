@@ -20,6 +20,16 @@ HELP_HTML = """
 <p>Example: selecting 1300 W means <b>Match Input Power = 1300 W</b>. Where available it also loads Load, Tune, Vpp, Iout, Match Output Resistance, and Match Output Reactance.</p>
 <p><b>Measured Iout is historical reference data and is currently UNTRUSTED.</b></p>
 
+<h2>3A. Matcher Impedance Terminology</h2>
+<p><b>ZS</b>: Source Impedance terminating matcher Port 1 (default 50 + j0 ohm).</p>
+<p><b>Zin</b>: Loaded Matcher Input Impedance seen at Port 1 when Port 2 is terminated by active load ZL.</p>
+<p><b>Zout</b>: Matcher Output Impedance seen at Port 2 when Port 1 is terminated by ZS and independent source excitation is suppressed.</p>
+<p><b>ZL</b>: Active Load Impedance seen at matcher Port 2.</p>
+<p><b>Z22</b>: Open-circuit Z-parameter (<code>V2/I2 | I1=0</code>). Z22 is not Zout and not ZL.</p>
+<p>S-parameters plus ZS determine Zout. S-parameters alone do not uniquely determine an arbitrary unknown ZL.</p>
+<p>Loaded matcher efficiency requires an active ZL from a selected load mode.</p>
+<p>Conjugate-match target is <code>conjugate(Zout)</code>; ideal conjugate match occurs when <code>ZL ≈ conjugate(Zout)</code>.</p>
+
 <h2>4. Match Power</h2>
 <p>Core terms: Match Input Power, Match Loss, Match Output Power, Matcher Efficiency.</p>
 <p><code>P_match_output = P_match_input * eta_match</code></p>

@@ -26,7 +26,14 @@ from rf.transmission_line import (
     vswr,
     z0_from_rlgc,
 )
-from rf.two_port import SParameters, evaluate_match_efficiency
+from rf.two_port import SParameters
+from rf.two_port import (
+    largest_singular_value_of_s,
+    matcher_input_impedance,
+    matcher_output_impedance,
+    s_to_z,
+    solve_loaded_two_port,
+)
 
 
 CURRENT_EPSILON_A = 1e-12
@@ -89,6 +96,25 @@ class CableAnalysisResult:
     cable_loss_percent: float
     power_balance_error_w: float
     power_balance_error_percent: float
+    matcher_source_impedance_zs: complex
+    matcher_input_impedance_zin: complex | None
+    matcher_output_impedance_zout: complex | None
+    z22_open_circuit_parameter_ohm: complex | None
+    z11_ohm: complex | None
+    z12_ohm: complex | None
+    z21_ohm: complex | None
+    load_impedance_zl: complex | None
+    conjugate_zout_target: complex | None
+    conjugate_match_delta_z: complex | None
+    conjugate_match_delta_r_ohm: float | None
+    conjugate_match_delta_x_ohm: float | None
+    conjugate_match_error_percent: float | None
+    active_load_mode_label: str
+    passivity_largest_singular_value: float | None
+    passivity_check_label: str | None
+    loaded_model_v2_rms_v: float | None
+    loaded_model_v2_vpp_v: float | None
+    measured_vpp_residual_v: float | None
     min_impedance_index: int | None
     min_impedance_z_m: float | None
     min_impedance_z_ohm: complex | None
@@ -110,31 +136,30 @@ class CableAnalysisResult:
     warnings: list[str]
 
 
-def _match_output_power(system: SystemParameters, z_in: complex) -> tuple[float, str]:
+def _match_output_power(system: SystemParameters, z_in: complex) -> tuple[float, str, object | None]:
     if system.match_output_power_source == MatchOutputPowerSource.USER:
         if system.match_output_power_w is None:
-            return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED"
-        return system.match_output_power_w, MatchOutputPowerSource.USER.value
+            return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED", None
+        return system.match_output_power_w, MatchOutputPowerSource.USER.value, None
     if system.match_output_power_source == MatchOutputPowerSource.CALCULATED:
         if system.matcher_model_mode == MatcherModelMode.USER_S:
-            try:
-                s = SParameters(
-                    s11=system.s11,
-                    s12=system.s12,
-                    s21=system.s21,
-                    s22=system.s22,
-                    zref_ohm=system.sparam_ref_impedance_ohm,
-                )
-                _, _, eta = evaluate_match_efficiency(
-                    s, complex(system.generator_impedance_ohm, 0.0), z_in, v_source_rms=1 + 0j
-                )
-                eta = min(max(float(eta), 0.0), 1.0)
-                return system.match_input_power_w * eta, "CALCULATED FROM MATCHER MODEL (S-PARAMETERS)"
-            except Exception:
-                return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED"
+            s = SParameters(
+                s11=system.s11,
+                s12=system.s12,
+                s21=system.s21,
+                s22=system.s22,
+                zref_ohm=system.sparam_ref_impedance_ohm,
+            )
+            solved = solve_loaded_two_port(
+                s=s,
+                z_source=system.source_impedance,
+                z_load=z_in,
+                p_match_input_w=system.match_input_power_w,
+            )
+            return solved.p_match_output_w, "CALCULATED FROM MATCHER MODEL (S-PARAMETERS, LOADED TWO-PORT)", solved
         eta = min(max(system.match_efficiency_percent / 100.0, 0.0), 1.0)
-        return system.match_input_power_w * eta, "CALCULATED FROM MATCHER MODEL (EFFICIENCY)"
-    return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED"
+        return system.match_input_power_w * eta, "CALCULATED FROM MATCHER MODEL (EFFICIENCY)", None
+    return system.match_input_power_w, "IDEAL MATCHER - NO MATCH LOSS ASSUMED", None
 
 
 def _line_model(frequency_hz: float, cable: CableParameters) -> tuple[complex, complex]:
@@ -207,6 +232,37 @@ def analyze_cable(
 
     cable_gamma, cable_z0 = _line_model(frequency_hz, cable)
     z_match_measured = system.match_output_impedance.value
+    active_load_mode_label = chamber.mode.value
+
+    z11_ohm: complex | None = None
+    z12_ohm: complex | None = None
+    z21_ohm: complex | None = None
+    z22_open_circuit_parameter_ohm: complex | None = None
+    matcher_output_impedance_zout: complex | None = None
+    matcher_input_impedance_zin: complex | None = None
+    passivity_largest_singular_value: float | None = None
+    passivity_check_label: str | None = None
+    loaded_matcher_solution = None
+    if system.matcher_model_mode == MatcherModelMode.USER_S:
+        sparams = SParameters(
+            s11=system.s11,
+            s12=system.s12,
+            s21=system.s21,
+            s22=system.s22,
+            zref_ohm=system.sparam_ref_impedance_ohm,
+        )
+        z_matrix = s_to_z(sparams)
+        z11_ohm = complex(z_matrix[0, 0])
+        z12_ohm = complex(z_matrix[0, 1])
+        z21_ohm = complex(z_matrix[1, 0])
+        z22_open_circuit_parameter_ohm = complex(z_matrix[1, 1])
+        matcher_output_impedance_zout = matcher_output_impedance(z_matrix, system.source_impedance)
+        passivity_largest_singular_value = largest_singular_value_of_s(sparams)
+        passivity_check_label = (
+            "PASS"
+            if passivity_largest_singular_value <= 1.0 + 1e-6
+            else "WARNING"
+        )
 
     connector_electrical_length_deg: float | None = None
     connector_electrical_length_wavelength: float | None = None
@@ -236,19 +292,30 @@ def analyze_cable(
         abcd_cable = transmission_line_abcd(cable_z0, cable_gamma, cable_length)
         abcd_total = cascade_abcd(abcd_connector, abcd_cable)
 
-        if chamber.mode in (ChamberImpedanceMode.USER_ENTERED, ChamberImpedanceMode.MEASURED):
+        if chamber.mode == ChamberImpedanceMode.DERIVED_FROM_DOWNSTREAM_PATH:
             if chamber.impedance is None:
-                raise ValueError("Chamber impedance required for selected chamber mode.")
-            z_load = chamber.impedance
-            z_in = input_impedance_from_abcd(abcd_total, z_load)
-            z_interface = input_impedance(z_load, cable_z0, cable_gamma, cable_length)
-        else:
+                z_in = z_match_measured
+                z_interface = deembed_load_impedance(z_in, connector_z0, connector_gamma, connector_length)
+                z_load = deembed_load_impedance(z_interface, cable_z0, cable_gamma, cable_length)
+            else:
+                z_load = chamber.impedance
+                z_in = input_impedance_from_abcd(abcd_total, z_load)
+                z_interface = input_impedance(z_load, cable_z0, cable_gamma, cable_length)
+        elif chamber.mode == ChamberImpedanceMode.MEASURED_OR_USER_LOAD:
             z_in = z_match_measured
             z_interface = deembed_load_impedance(z_in, connector_z0, connector_gamma, connector_length)
             z_load = deembed_load_impedance(z_interface, cable_z0, cable_gamma, cable_length)
+        elif chamber.mode == ChamberImpedanceMode.CONJUGATE_MATCH_TO_ZOUT:
+            if matcher_output_impedance_zout is None:
+                raise ValueError("Zout is required before conjugate-match load mode can be applied.")
+            z_in = np.conjugate(matcher_output_impedance_zout)
+            z_interface = deembed_load_impedance(z_in, connector_z0, connector_gamma, connector_length)
+            z_load = deembed_load_impedance(z_interface, cable_z0, cable_gamma, cable_length)
+        else:
+            raise ValueError("Load mode is FUTURE / EXPERIMENTAL and not implemented.")
 
         p_match_input = system.match_input_power_w
-        p_match_output, p_match_source = _match_output_power(system, z_in)
+        p_match_output, p_match_source, loaded_matcher_solution = _match_output_power(system, z_in)
         p_match_loss = p_match_input - p_match_output
         connector_input_power_w = p_match_output
         v0, _ = normalize_boundary_from_real_power(z_in, p_match_output)
@@ -323,17 +390,26 @@ def analyze_cable(
         )
     else:
         line_length = cable_length
-        if chamber.mode in (ChamberImpedanceMode.USER_ENTERED, ChamberImpedanceMode.MEASURED):
+        if chamber.mode == ChamberImpedanceMode.DERIVED_FROM_DOWNSTREAM_PATH:
             if chamber.impedance is None:
-                raise ValueError("Chamber impedance required for selected chamber mode.")
-            z_load = chamber.impedance
-            z_in = input_impedance(z_load, cable_z0, cable_gamma, line_length)
-        else:
+                z_in = z_match_measured
+                z_load = deembed_load_impedance(z_in, cable_z0, cable_gamma, line_length)
+            else:
+                z_load = chamber.impedance
+                z_in = input_impedance(z_load, cable_z0, cable_gamma, line_length)
+        elif chamber.mode == ChamberImpedanceMode.MEASURED_OR_USER_LOAD:
             z_in = z_match_measured
             z_load = deembed_load_impedance(z_in, cable_z0, cable_gamma, line_length)
+        elif chamber.mode == ChamberImpedanceMode.CONJUGATE_MATCH_TO_ZOUT:
+            if matcher_output_impedance_zout is None:
+                raise ValueError("Zout is required before conjugate-match load mode can be applied.")
+            z_in = np.conjugate(matcher_output_impedance_zout)
+            z_load = deembed_load_impedance(z_in, cable_z0, cable_gamma, line_length)
+        else:
+            raise ValueError("Load mode is FUTURE / EXPERIMENTAL and not implemented.")
 
         p_match_input = system.match_input_power_w
-        p_match_output, p_match_source = _match_output_power(system, z_in)
+        p_match_output, p_match_source, loaded_matcher_solution = _match_output_power(system, z_in)
         p_match_loss = p_match_input - p_match_output
         v0, _ = normalize_boundary_from_real_power(z_in, p_match_output)
         z_m = np.linspace(0.0, line_length, points)
@@ -376,12 +452,32 @@ def analyze_cable(
         flexible_cable_loss_w = p_cable_loss
         electrical_length_total_deg = electrical_length_deg(frequency_hz, cable.velocity_factor, line_length)
 
+    if system.matcher_model_mode == MatcherModelMode.USER_S and z11_ohm is not None:
+        z_matrix_for_loaded = np.array(
+            [
+                [z11_ohm, z12_ohm if z12_ohm is not None else 0.0 + 0.0j],
+                [z21_ohm if z21_ohm is not None else 0.0 + 0.0j, z22_open_circuit_parameter_ohm if z22_open_circuit_parameter_ohm is not None else 0.0 + 0.0j],
+            ],
+            dtype=complex,
+        )
+        matcher_input_impedance_zin = matcher_input_impedance(z_matrix_for_loaded, z_in)
+    if loaded_matcher_solution is not None:
+        matcher_input_impedance_zin = loaded_matcher_solution.zin_ohm
+
+    conjugate_zout_target = np.conjugate(matcher_output_impedance_zout) if matcher_output_impedance_zout is not None else None
+    conjugate_match_delta_z = (z_in - conjugate_zout_target) if conjugate_zout_target is not None else None
+    conjugate_match_delta_r_ohm = float(conjugate_match_delta_z.real) if conjugate_match_delta_z is not None else None
+    conjugate_match_delta_x_ohm = float(conjugate_match_delta_z.imag) if conjugate_match_delta_z is not None else None
+    conjugate_match_error_percent = None
+    if conjugate_match_delta_z is not None and abs(conjugate_zout_target) > 1e-12:
+        conjugate_match_error_percent = float(100.0 * abs(conjugate_match_delta_z) / abs(conjugate_zout_target))
+
     gl = reflection_coefficient(z_load, cable_z0)
     z_from_vi_match = complex(z_local_ohm[0])
     z_from_vi_end = complex(z_local_ohm[-1])
-    endpoint_match_delta = z_from_vi_match - z_match_measured
+    endpoint_match_delta = z_from_vi_match - z_in
     endpoint_end_delta = z_from_vi_end - z_load
-    endpoint_match_rel_error = abs(endpoint_match_delta) / abs(z_match_measured) if abs(z_match_measured) > 0 else float("inf")
+    endpoint_match_rel_error = abs(endpoint_match_delta) / abs(z_in) if abs(z_in) > 0 else float("inf")
     endpoint_end_rel_error = abs(endpoint_end_delta) / abs(z_load) if abs(z_load) > 0 else float("inf")
 
     i_abs = np.abs(i_rms)
@@ -438,6 +534,12 @@ def analyze_cable(
         warnings.append("COORDINATE OFFSET ONLY: CONNECTOR RF BEHAVIOR NOT MODELED.")
     if connector_enabled and connector.model_mode == ConnectorModelMode.TRANSMISSION_LINE:
         warnings.append("Real connector interface parasitics are not modeled unless explicit parameters are provided.")
+    if loaded_matcher_solution is not None and loaded_matcher_solution.eta_match > 1.0 + 1e-6:
+        warnings.append(
+            "WARNING: Calculated matcher efficiency exceeds 100%. Check S-parameter passivity, current convention and load/reference planes."
+        )
+    if passivity_largest_singular_value is not None and passivity_largest_singular_value > 1.0 + 1e-6:
+        warnings.append("PASSIVITY CHECK: WARNING (largest singular value of S exceeds 1).")
     endpoint_warning_threshold = 1e-4
     if endpoint_match_rel_error > endpoint_warning_threshold:
         warnings.append(
@@ -506,6 +608,31 @@ def analyze_cable(
         cable_loss_percent=p_cable_loss_pct,
         power_balance_error_w=p_balance_err,
         power_balance_error_percent=p_balance_err_pct,
+        matcher_source_impedance_zs=system.source_impedance,
+        matcher_input_impedance_zin=matcher_input_impedance_zin,
+        matcher_output_impedance_zout=matcher_output_impedance_zout,
+        z22_open_circuit_parameter_ohm=z22_open_circuit_parameter_ohm,
+        z11_ohm=z11_ohm,
+        z12_ohm=z12_ohm,
+        z21_ohm=z21_ohm,
+        load_impedance_zl=z_in,
+        conjugate_zout_target=conjugate_zout_target,
+        conjugate_match_delta_z=conjugate_match_delta_z,
+        conjugate_match_delta_r_ohm=conjugate_match_delta_r_ohm,
+        conjugate_match_delta_x_ohm=conjugate_match_delta_x_ohm,
+        conjugate_match_error_percent=conjugate_match_error_percent,
+        active_load_mode_label=active_load_mode_label,
+        passivity_largest_singular_value=passivity_largest_singular_value,
+        passivity_check_label=passivity_check_label,
+        loaded_model_v2_rms_v=float(abs(loaded_matcher_solution.v2_rms_v)) if loaded_matcher_solution is not None else None,
+        loaded_model_v2_vpp_v=float(2.0 * np.sqrt(2.0) * abs(loaded_matcher_solution.v2_rms_v))
+        if loaded_matcher_solution is not None
+        else None,
+        measured_vpp_residual_v=(
+            float(system.measured_vpp_v - (2.0 * np.sqrt(2.0) * abs(loaded_matcher_solution.v2_rms_v)))
+            if (loaded_matcher_solution is not None and system.measured_vpp_v is not None)
+            else None
+        ),
         min_impedance_index=min_impedance_index,
         min_impedance_z_m=min_impedance_z_m,
         min_impedance_z_ohm=min_impedance_z_ohm,

@@ -223,36 +223,39 @@ class MainWindow(QMainWindow):
         sys = QFormLayout(sys_box)
         self.freq_mhz = _line_edit("60", "System RF frequency in MHz.")
         self.p_match_in_w = _line_edit("1200", "Real RF power at matcher input reference plane [W].")
-        self.z_gen = _line_edit("50", "Generator reference impedance [ohm].")
-        self.p_match_out = _line_edit("1200", "Match Output real power at match-output reference plane [W].")
-        self.match_eff = _line_edit("70", "Match efficiency [%] when using calculated mode.")
+        self.z_gen = _line_edit("50", "Source impedance ZS real part [ohm].")
+        self.z_gen_x = _line_edit("0", "Source impedance ZS imaginary part [ohm].")
+        self.p_match_out = _line_edit("", "Calculated Match Output real power at match-output reference plane [W].")
+        self.p_match_out.setReadOnly(True)
+        self.match_eff = _line_edit("70", "Match efficiency [%]. Not used in USER S-PARAMETERS calculated mode.")
         self.power_source = QComboBox()
         self.power_source.addItems([s.value for s in MatchOutputPowerSource])
-        self.zm_r = _line_edit("3", "Match Output impedance real part [ohm].")
-        self.zm_x = _line_edit("19", "Match Output impedance imaginary part [ohm].")
+        self.power_source.currentTextChanged.connect(self._on_matcher_mode_changed)
+        self.zm_r = _line_edit("3", "Historical / operating-point load resistance RL [ohm].")
+        self.zm_x = _line_edit("19", "Historical / operating-point load reactance XL [ohm].")
         self.vpp = _line_edit("", "Measured Vpp at Match Output [V]. Optional.")
         self.s_mode_lbl = QLabel("Matcher Model: IDEAL")
         self.matcher_mode = QComboBox()
         self.matcher_mode.addItems([m.value for m in MatcherModelMode])
         self.matcher_mode.currentTextChanged.connect(self._on_matcher_mode_changed)
-        self.s11r = _line_edit("0", "S11 real")
-        self.s11i = _line_edit("0", "S11 imag")
-        self.s12r = _line_edit("1", "S12 real")
-        self.s12i = _line_edit("0", "S12 imag")
-        self.s21r = _line_edit("1", "S21 real")
-        self.s21i = _line_edit("0", "S21 imag")
-        self.s22r = _line_edit("0", "S22 real")
-        self.s22i = _line_edit("0", "S22 imag")
+        self.s11r = _line_edit("-0.817", "S11 real")
+        self.s11i = _line_edit("0.414", "S11 imag")
+        self.s12r = _line_edit("-0.0561", "S12 real")
+        self.s12i = _line_edit("0.343", "S12 imag")
+        self.s21r = _line_edit("-0.0559", "S21 real")
+        self.s21i = _line_edit("0.343", "S21 imag")
+        self.s22r = _line_edit("-0.670", "S22 real")
+        self.s22i = _line_edit("-0.625", "S22 imag")
         self.s_zref = _line_edit("50", "S-parameter reference impedance [ohm]")
         self.s_freq = _line_edit("60", "S-parameter frequency [MHz]")
         sys.addRow("Frequency [MHz]", self.freq_mhz)
         sys.addRow("Match Input Power [W]", self.p_match_in_w)
-        sys.addRow("Generator Z [ohm]", self.z_gen)
-        sys.addRow("Match Output Power [W]", self.p_match_out)
+        sys.addRow("Source Impedance ZS [ohm] (R, X)", self._pair_widget(self.z_gen, self.z_gen_x))
+        sys.addRow("Calculated Match Output Power [W]", self.p_match_out)
         sys.addRow("Match Output Power Mode", self.power_source)
         sys.addRow("Match Efficiency [%]", self.match_eff)
-        sys.addRow("Match Output R [ohm]", self.zm_r)
-        sys.addRow("Match Output X [ohm]", self.zm_x)
+        sys.addRow("Load R, RL [ohm]", self.zm_r)
+        sys.addRow("Load X, XL [ohm]", self.zm_x)
         sys.addRow("Measured Vpp [V]", self.vpp)
         sys.addRow("Matcher Model", self.matcher_mode)
         sys.addRow("S11 (Re, Im)", self._pair_widget(self.s11r, self.s11i))
@@ -267,13 +270,13 @@ class MainWindow(QMainWindow):
         chamber = QFormLayout(chamber_box)
         self.chamber_mode = QComboBox()
         self.chamber_mode.addItems([m.value for m in ChamberImpedanceMode])
-        self.chamber_mode.setCurrentText(ChamberImpedanceMode.DERIVED_FROM_MATCH.value)
+        self.chamber_mode.setCurrentText(ChamberImpedanceMode.MEASURED_OR_USER_LOAD.value)
         self.chamber_mode.currentTextChanged.connect(self._toggle_chamber_fields)
         self.zl_r = _line_edit("", "Chamber impedance real part [ohm].")
         self.zl_x = _line_edit("", "Chamber impedance imaginary part [ohm].")
-        chamber.addRow("Mode", self.chamber_mode)
-        chamber.addRow("Chamber R [ohm]", self.zl_r)
-        chamber.addRow("Chamber X [ohm]", self.zl_x)
+        chamber.addRow("Load Impedance Mode", self.chamber_mode)
+        chamber.addRow("Downstream Chamber R [ohm]", self.zl_r)
+        chamber.addRow("Downstream Chamber X [ohm]", self.zl_x)
 
         btns = QHBoxLayout()
         self.run_btn = QPushButton("Run Analysis")
@@ -297,6 +300,7 @@ class MainWindow(QMainWindow):
         self.system_diag.setStyleSheet("color: #a7f3d0;")
         layout.addWidget(self.system_diag, 0, 1)
         self._toggle_chamber_fields()
+        self._on_matcher_mode_changed(self.matcher_mode.currentText())
 
     def _build_cable_tab(self) -> None:
         tab = QWidget()
@@ -1041,9 +1045,17 @@ class MainWindow(QMainWindow):
         self.att_mode.setEnabled(not use_rlgc)
 
     def _toggle_chamber_fields(self) -> None:
-        direct = self.chamber_mode.currentText() != ChamberImpedanceMode.DERIVED_FROM_MATCH.value
-        self.zl_r.setEnabled(direct)
-        self.zl_x.setEnabled(direct)
+        mode = self.chamber_mode.currentText()
+        manual_load_mode = mode == ChamberImpedanceMode.MEASURED_OR_USER_LOAD.value
+        downstream_mode = mode == ChamberImpedanceMode.DERIVED_FROM_DOWNSTREAM_PATH.value
+        conjugate_mode = mode == ChamberImpedanceMode.CONJUGATE_MATCH_TO_ZOUT.value
+        self.zm_r.setEnabled(manual_load_mode)
+        self.zm_x.setEnabled(manual_load_mode)
+        self.zl_r.setEnabled(downstream_mode)
+        self.zl_x.setEnabled(downstream_mode)
+        if conjugate_mode:
+            self.zm_r.setEnabled(False)
+            self.zm_x.setEnabled(False)
 
     @staticmethod
     def _as_float_or_none(text: str) -> float | None:
@@ -1054,6 +1066,19 @@ class MainWindow(QMainWindow):
             return float(value)
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_required_float(text: str, field_name: str) -> float:
+        value = text.strip()
+        if not value:
+            raise ValueError(f"{field_name} is required.")
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a valid number.") from exc
+        if not np.isfinite(parsed):
+            raise ValueError(f"{field_name} must be finite.")
+        return parsed
 
     def _active_frequency_mhz(self) -> float:
         try:
@@ -1188,7 +1213,13 @@ class MainWindow(QMainWindow):
         self.recalculate()
 
     def _on_matcher_mode_changed(self, text: str) -> None:
-        self.s_mode_lbl.setText(f"Matcher Model: {text}")
+        self.s_mode_lbl.setText(f"Matcher Model: {self.matcher_mode.currentText()}")
+        s_mode_active = self.matcher_mode.currentText() == MatcherModelMode.USER_S.value
+        calculated_mode = self.power_source.currentText() == MatchOutputPowerSource.CALCULATED.value
+        self.match_eff.setEnabled(not (s_mode_active and calculated_mode))
+        self.p_match_out.setReadOnly(calculated_mode)
+        if s_mode_active and calculated_mode:
+            self.match_eff.setText("0")
         self.recalculate()
 
     def _on_operating_point_changed(self, text: str) -> None:
@@ -1213,23 +1244,41 @@ class MainWindow(QMainWindow):
         self._sync_attenuation_from_mode()
         source = MatchOutputPowerSource(self.power_source.currentText())
         matcher_mode = MatcherModelMode(self.matcher_mode.currentText())
+        s_mode_calculated = matcher_mode == MatcherModelMode.USER_S and source == MatchOutputPowerSource.CALCULATED
+        match_efficiency_percent = 0.0 if s_mode_calculated else self._parse_required_float(self.match_eff.text(), "Match Efficiency")
         system = SystemParameters(
-            frequency_mhz=float(self.freq_mhz.text()),
-            match_input_power_w=float(self.p_match_in_w.text()),
-            generator_impedance_ohm=float(self.z_gen.text()),
-            match_efficiency_percent=float(self.match_eff.text()),
+            frequency_mhz=self._parse_required_float(self.freq_mhz.text(), "Frequency"),
+            match_input_power_w=self._parse_required_float(self.p_match_in_w.text(), "Match Input Power"),
+            generator_impedance_ohm=self._parse_required_float(self.z_gen.text(), "Source Impedance ZS (R)"),
+            generator_impedance_imag_ohm=self._parse_required_float(self.z_gen_x.text(), "Source Impedance ZS (X)"),
+            match_efficiency_percent=match_efficiency_percent,
             match_output_power_source=source,
             matcher_model_mode=matcher_mode,
-            match_output_power_w=float(self.p_match_out.text()) if self.p_match_out.text().strip() else None,
-            match_output_impedance=ComplexImpedance(float(self.zm_r.text()), float(self.zm_x.text())),
-            measured_vpp_v=float(self.vpp.text()) if self.vpp.text().strip() else None,
+            match_output_power_w=self._as_float_or_none(self.p_match_out.text()),
+            match_output_impedance=ComplexImpedance(
+                self._parse_required_float(self.zm_r.text(), "Historical Load R, RL"),
+                self._parse_required_float(self.zm_x.text(), "Historical Load X, XL"),
+            ),
+            measured_vpp_v=self._as_float_or_none(self.vpp.text()),
             measured_iout_untrusted_a=None,
-            s11=complex(float(self.s11r.text()), float(self.s11i.text())),
-            s12=complex(float(self.s12r.text()), float(self.s12i.text())),
-            s21=complex(float(self.s21r.text()), float(self.s21i.text())),
-            s22=complex(float(self.s22r.text()), float(self.s22i.text())),
-            sparam_ref_impedance_ohm=float(self.s_zref.text()),
-            sparam_frequency_mhz=float(self.s_freq.text()) if self.s_freq.text().strip() else None,
+            s11=complex(
+                self._parse_required_float(self.s11r.text(), "S11 real"),
+                self._parse_required_float(self.s11i.text(), "S11 imaginary"),
+            ),
+            s12=complex(
+                self._parse_required_float(self.s12r.text(), "S12 real"),
+                self._parse_required_float(self.s12i.text(), "S12 imaginary"),
+            ),
+            s21=complex(
+                self._parse_required_float(self.s21r.text(), "S21 real"),
+                self._parse_required_float(self.s21i.text(), "S21 imaginary"),
+            ),
+            s22=complex(
+                self._parse_required_float(self.s22r.text(), "S22 real"),
+                self._parse_required_float(self.s22i.text(), "S22 imaginary"),
+            ),
+            sparam_ref_impedance_ohm=self._parse_required_float(self.s_zref.text(), "S-parameter Reference Impedance"),
+            sparam_frequency_mhz=self._as_float_or_none(self.s_freq.text()),
         )
         c_mode = CableModelMode(self.cable_mode.currentText())
         cable = CableParameters(
@@ -1352,10 +1401,26 @@ class MainWindow(QMainWindow):
             result = analyze_cable(system, cable, chamber, connector=connector)
             self.last_result = result
             self.last_stress_result = self._compute_stress_result(result)
-            self.system_diag.setText(self._format_consistency_diagnostic(system))
-            if system.match_output_power_source == MatchOutputPowerSource.USER and result.match_input_power_w > 0:
+            self.system_diag.setText(self._format_consistency_diagnostic(system, result))
+            self.p_match_out.setText(f"{result.match_output_power_w:.6g}")
+            if (
+                system.matcher_model_mode == MatcherModelMode.USER_S
+                and system.match_output_power_source == MatchOutputPowerSource.CALCULATED
+                and result.match_input_power_w > 0
+            ):
                 derived_eff = 100.0 * result.match_output_power_w / result.match_input_power_w
                 self.match_eff.setText(f"{derived_eff:.6g}")
+            elif system.match_output_power_source == MatchOutputPowerSource.USER and result.match_input_power_w > 0:
+                derived_eff = 100.0 * result.match_output_power_w / result.match_input_power_w
+                self.match_eff.setText(f"{derived_eff:.6g}")
+
+            if (
+                system.matcher_model_mode == MatcherModelMode.USER_S
+                and result.load_impedance_zl is not None
+                and chamber.mode != ChamberImpedanceMode.MEASURED_OR_USER_LOAD
+            ):
+                self.zm_r.setText(f"{result.load_impedance_zl.real:.6g}")
+                self.zm_x.setText(f"{result.load_impedance_zl.imag:.6g}")
             self._update_cards(result, system)
             all_warnings = valid.warnings + result.warnings
             if "IDEAL MATCHER - NO MATCH LOSS ASSUMED" in result.match_output_power_source_label:
@@ -1385,18 +1450,28 @@ class MainWindow(QMainWindow):
             if hasattr(self, "smith_canvas"):
                 self.smith_canvas.clear_chart()
 
-    def _format_consistency_diagnostic(self, system: SystemParameters) -> str:
+    def _format_consistency_diagnostic(self, system: SystemParameters, result: CableAnalysisResult | None = None) -> str:
         if system.measured_vpp_v is None:
             return "Reference-plane / measurement consistency check: Vpp not provided."
-        z = system.match_output_impedance.value
-        zmag = abs(z)
-        vrms = system.measured_vpp_v / (2.0 * np.sqrt(2.0))
-        icalc = vrms / zmag if zmag else np.nan
+        measured_vrms = system.measured_vpp_v / (2.0 * np.sqrt(2.0))
+        if result is None:
+            return (
+                "Reference-plane / measurement consistency check\n"
+                f"Measured Vpp={system.measured_vpp_v:.2f} V, Measured Vrms={measured_vrms:.2f} V\n"
+                "Loaded-model V2 is unavailable."
+            )
+        loaded_vrms = result.loaded_model_v2_rms_v
+        loaded_vpp = result.loaded_model_v2_vpp_v
+        residual = result.measured_vpp_residual_v
+        loaded_text = f"{loaded_vrms:.2f} V" if loaded_vrms is not None else "N/A"
+        loaded_vpp_text = f"{loaded_vpp:.2f} V" if loaded_vpp is not None else "N/A"
+        residual_text = f"{residual:+.2f} V" if residual is not None else "N/A"
         return (
             "Reference-plane / measurement consistency check\n"
-            f"Zmag={zmag:.4f} ohm, Zphase={np.degrees(np.angle(z)):.2f} deg, "
-            f"Vrms(Vpp)={vrms:.2f} V, Icalc={icalc:.2f} A\n"
-            "Do not infer Match Input Power directly from Match Output V/I without a matcher model."
+            f"Measured Vpp={system.measured_vpp_v:.2f} V, Measured Vrms={measured_vrms:.2f} V\n"
+            f"Loaded-model V2 RMS={loaded_text}, Loaded-model V2 Vpp={loaded_vpp_text}\n"
+            f"Vpp residual (Measured - Loaded)={residual_text}\n"
+            "Do not calculate operating load current as Vpp/|Zout| or Vpp/|Z22|."
         )
 
     def _update_cards(self, r: CableAnalysisResult, system: SystemParameters) -> None:
@@ -2266,8 +2341,24 @@ class MainWindow(QMainWindow):
 
         z_match = complex(r.z_local_ohm[0])
         z_end = complex(r.z_local_ohm[-1])
-        self.smith_match_label.setText(f"MATCH OUTPUT IMPEDANCE\n{z_match.real:+.3f}{z_match.imag:+.3f}j ohm")
-        self.smith_end_label.setText(f"CABLE END IMPEDANCE\n{z_end.real:+.3f}{z_end.imag:+.3f}j ohm")
+        self.smith_match_label.setText(f"Load Impedance ZL\n{z_match.real:+.3f}{z_match.imag:+.3f}j ohm")
+        self.smith_end_label.setText(f"Chamber/Cable-End Impedance\n{z_end.real:+.3f}{z_end.imag:+.3f}j ohm")
+        z0 = complex(r.z0_reference)
+
+        def _gamma_from_z(z_value: complex | None) -> complex | None:
+            if z_value is None:
+                return None
+            denom = z_value + z0
+            if abs(denom) < 1e-12:
+                return None
+            return (z_value - z0) / denom
+
+        self.smith_canvas.set_impedance_summary_markers(
+            zout_gamma=_gamma_from_z(r.matcher_output_impedance_zout),
+            conjugate_zout_gamma=_gamma_from_z(r.conjugate_zout_target),
+            zl_gamma=_gamma_from_z(r.load_impedance_zl),
+            zin_gamma=_gamma_from_z(r.matcher_input_impedance_zin),
+        )
         if r.connector_enabled and r.connector_mode == ConnectorModelMode.COORDINATE_OFFSET_ONLY.value:
             self.smith_note_label.setText(
                 (self.smith_note_label.text() + "\n" if self.smith_note_label.text() else "")
@@ -2509,10 +2600,54 @@ class MainWindow(QMainWindow):
         ideal_note = ""
         if "IDEAL MATCHER" in r.match_output_power_source_label:
             ideal_note = "IDEAL MATCHER - NO MATCH LOSS ASSUMED\n\n"
+        zout_text = (
+            f"{r.matcher_output_impedance_zout.real:+.3f}{r.matcher_output_impedance_zout.imag:+.3f}j ohm"
+            if r.matcher_output_impedance_zout is not None
+            else "LOAD REQUIRED"
+        )
+        zin_text = (
+            f"{r.matcher_input_impedance_zin.real:+.3f}{r.matcher_input_impedance_zin.imag:+.3f}j ohm"
+            if r.matcher_input_impedance_zin is not None
+            else "LOAD REQUIRED"
+        )
+        z22_text = (
+            f"{r.z22_open_circuit_parameter_ohm.real:+.3f}{r.z22_open_circuit_parameter_ohm.imag:+.3f}j ohm"
+            if r.z22_open_circuit_parameter_ohm is not None
+            else "N/A"
+        )
+        zl_text = (
+            f"{r.load_impedance_zl.real:+.3f}{r.load_impedance_zl.imag:+.3f}j ohm"
+            if r.load_impedance_zl is not None
+            else "LOAD REQUIRED"
+        )
+        conjugate_text = (
+            f"{r.conjugate_zout_target.real:+.3f}{r.conjugate_zout_target.imag:+.3f}j ohm"
+            if r.conjugate_zout_target is not None
+            else "N/A"
+        )
+        delta_z_text = (
+            f"{r.conjugate_match_delta_z.real:+.3f}{r.conjugate_match_delta_z.imag:+.3f}j ohm"
+            if r.conjugate_match_delta_z is not None
+            else "N/A"
+        )
+        passivity_text = (
+            f"{r.passivity_check_label} (sigma_max={r.passivity_largest_singular_value:.4f})"
+            if r.passivity_largest_singular_value is not None and r.passivity_check_label is not None
+            else "N/A"
+        )
         self.summary_label.setText(
             f"Reference planes:\n"
             f"Match Input -> Matcher -> Match Output -> Connector/Transition -> Flexible Cable Start -> Cable End/Chamber\n\n"
             f"{ideal_note}"
+            f"ACTIVE LOAD MODE = {r.active_load_mode_label}\n"
+            f"Source Impedance ZS = {r.matcher_source_impedance_zs.real:+.3f}{r.matcher_source_impedance_zs.imag:+.3f}j ohm\n"
+            f"Matcher Input Impedance Zin = {zin_text}\n"
+            f"Z22 Open-Circuit Network Parameter = {z22_text}\n"
+            f"Matcher Output Impedance Zout = {zout_text}\n"
+            f"Conjugate(Zout) = {conjugate_text}\n"
+            f"Active Load Impedance ZL = {zl_text}\n"
+            f"Conjugate Match Delta Z = {delta_z_text}\n"
+            f"S-Parameter Passivity Check = {passivity_text}\n\n"
             f"Match Input Power = {r.match_input_power_w:.3f} W\n"
             f"Match Output Power = {r.match_output_power_w:.3f} W [{r.match_output_power_source_label}]\n"
             f"Match Loss = {r.match_loss_w:.3f} W\n"

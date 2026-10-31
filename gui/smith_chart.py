@@ -48,6 +48,9 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._historical_artist = None
         self._measurement_artists: list = []
         self._measurement_labels: list = []
+        self._impedance_summary_artists: list = []
+        self._impedance_summary_labels: list = []
+        self._conjugate_error_artist = None
         self._probe_annotation = None
         self._hover_annotation = None
         self._hover_formatter: Callable[[int], str] | None = None
@@ -72,6 +75,9 @@ class SmithChartCanvas(FigureCanvasQTAgg):
         self._historical_artist = None
         self._measurement_artists = []
         self._measurement_labels = []
+        self._impedance_summary_artists = []
+        self._impedance_summary_labels = []
+        self._conjugate_error_artist = None
         self.ax.set_facecolor("#0b1220")
         theta = np.linspace(0, 2 * np.pi, 720)
         self.ax.plot(np.cos(theta), np.sin(theta), color="#9ca3af", linewidth=1.3)
@@ -368,6 +374,67 @@ class SmithChartCanvas(FigureCanvasQTAgg):
             marker_artist.set_gid(f"measure-{idx}@{pos:.4f}m")
             self._measurement_artists.append(marker_artist)
             self._measurement_labels.append(text_artist)
+
+    def set_impedance_summary_markers(
+        self,
+        zout_gamma: complex | None,
+        conjugate_zout_gamma: complex | None,
+        zl_gamma: complex | None,
+        zin_gamma: complex | None = None,
+    ) -> None:
+        for artist in self._impedance_summary_artists:
+            artist.remove()
+        self._impedance_summary_artists = []
+        for label in self._impedance_summary_labels:
+            label.remove()
+        self._impedance_summary_labels = []
+        if self._conjugate_error_artist is not None:
+            self._conjugate_error_artist.remove()
+            self._conjugate_error_artist = None
+
+        marker_defs = [
+            (zout_gamma, "Zout", "#f97316", "o"),
+            (conjugate_zout_gamma, "Conj(Zout)", "#fde047", "^"),
+            (zl_gamma, "ZL", "#22c55e", "s"),
+            (zin_gamma, "Zin", "#22d3ee", "D"),
+        ]
+        for gamma, label, color, marker in marker_defs:
+            if gamma is None or not (np.isfinite(gamma.real) and np.isfinite(gamma.imag)):
+                continue
+            (artist,) = self.ax.plot(
+                [gamma.real],
+                [gamma.imag],
+                marker=marker,
+                markersize=7,
+                color=color,
+                markeredgecolor="#111827",
+                zorder=10,
+            )
+            txt = self.ax.text(gamma.real + 0.02, gamma.imag + 0.02, label, color=color, fontsize=8)
+            self._impedance_summary_artists.append(artist)
+            self._impedance_summary_labels.append(txt)
+
+        if (
+            conjugate_zout_gamma is not None
+            and zl_gamma is not None
+            and np.isfinite(conjugate_zout_gamma.real)
+            and np.isfinite(conjugate_zout_gamma.imag)
+            and np.isfinite(zl_gamma.real)
+            and np.isfinite(zl_gamma.imag)
+        ):
+            (self._conjugate_error_artist,) = self.ax.plot(
+                [conjugate_zout_gamma.real, zl_gamma.real],
+                [conjugate_zout_gamma.imag, zl_gamma.imag],
+                color="#fb923c",
+                linewidth=1.8,
+                linestyle="--",
+                zorder=9,
+            )
+            mid_x = 0.5 * (conjugate_zout_gamma.real + zl_gamma.real)
+            mid_y = 0.5 * (conjugate_zout_gamma.imag + zl_gamma.imag)
+            self._impedance_summary_labels.append(
+                self.ax.text(mid_x + 0.02, mid_y + 0.02, "Conjugate Match Error", color="#fb923c", fontsize=8)
+            )
 
     def set_historical_region(self, gamma_values: np.ndarray, enabled: bool) -> None:
         if self._historical_artist is not None:
