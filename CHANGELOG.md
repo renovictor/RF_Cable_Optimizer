@@ -1,5 +1,18 @@
 # Changelog
 
+## V2026.10.10 - 2026-10-31
+
+- Improved System Input readability:
+  - added a right-side yellow **S-parameter mode workflow** instruction block
+  - increased diagnostic text size for better legibility
+- Improved Cable Analysis input readability:
+  - increased Cable Preset combo height/visibility
+  - added vertical spacing around MATCH-SIDE CONNECTOR notes text
+- Updated startup defaults:
+  - RLGC defaults set to `R'=0.2331`, `L'=2.1945e-7`, `G'=0`, `C'=8.7780e-11`
+- Engineering Summary enhancement:
+  - summary text is now selectable/copyable for report use
+
 ## V2026.10.9 - 2026-10-31
 
 - Updated matcher S-parameter workflow UX:

@@ -295,10 +295,18 @@ class MainWindow(QMainWindow):
         left.addStretch(1)
         layout.addLayout(left, 0, 0)
 
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        self.sparam_instruction = QLabel(self._s_parameter_workflow_text())
+        self.sparam_instruction.setWordWrap(True)
+        self.sparam_instruction.setStyleSheet("color: #fde047; font-size: 14px; font-weight: 600;")
+        right_layout.addWidget(self.sparam_instruction)
         self.system_diag = QLabel("")
         self.system_diag.setWordWrap(True)
-        self.system_diag.setStyleSheet("color: #a7f3d0;")
-        layout.addWidget(self.system_diag, 0, 1)
+        self.system_diag.setStyleSheet("color: #a7f3d0; font-size: 14px; font-weight: 500;")
+        right_layout.addWidget(self.system_diag)
+        right_layout.addStretch(1)
+        layout.addWidget(right_panel, 0, 1)
         self._toggle_chamber_fields()
         self._on_matcher_mode_changed(self.matcher_mode.currentText())
 
@@ -362,6 +370,9 @@ class MainWindow(QMainWindow):
         sticky_form = QFormLayout(sticky_header)
         self.cable_preset = FocusWheelComboBox()
         self.cable_preset.addItems(["DX7 Existing Cable", "COMCRAFT AA-11459", "Custom"])
+        self.cable_preset.setMinimumContentsLength(24)
+        self.cable_preset.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cable_preset.setMinimumHeight(34)
         self.cable_preset.currentTextChanged.connect(self._on_cable_preset_changed)
         self.run_btn_cable = QPushButton("Run Analysis")
         self.run_btn_cable.clicked.connect(self.recalculate)
@@ -1005,6 +1016,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         self.summary_label = QLabel("Run analysis to view summary.")
         self.summary_label.setWordWrap(True)
+        self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         layout.addWidget(self.summary_label)
 
     def _build_feed_image_tab(self, tab_title: str, image_name: str, label_attr_name: str) -> None:
@@ -1472,6 +1484,18 @@ class MainWindow(QMainWindow):
             f"Loaded-model V2 RMS={loaded_text}, Loaded-model V2 Vpp={loaded_vpp_text}\n"
             f"Vpp residual (Measured - Loaded)={residual_text}\n"
             "Do not calculate operating load current as Vpp/|Zout| or Vpp/|Z22|."
+        )
+
+    @staticmethod
+    def _s_parameter_workflow_text() -> str:
+        return (
+            "S-PARAMETER MODE WORKFLOW\n"
+            "1) Match Output Power Mode = CALCULATED FROM MATCHER MODEL\n"
+            "2) Matcher Model = USER S-PARAMETERS\n"
+            "3) Enter ZS, S11/S12/S21/S22, Zref, S-Param Frequency, Match Input Power\n"
+            "4) Select one Load Impedance Mode (Measured/User, Downstream Path, or Conjugate Match)\n"
+            "5) Click Run Analysis\n"
+            "6) Verify summary line includes: CALCULATED FROM MATCHER MODEL (S-PARAMETERS, LOADED TWO-PORT)"
         )
 
     def _update_cards(self, r: CableAnalysisResult, system: SystemParameters) -> None:

@@ -16,6 +16,7 @@ class ConnectorSpecificationPanel(QWidget):
         layout = QVBoxLayout(self)
         group = QGroupBox("MATCH-SIDE CONNECTOR / TRANSITION")
         form = QFormLayout(group)
+        form.setVerticalSpacing(8)
 
         self.include_connector = QCheckBox("Include Connector")
         self.include_connector.setChecked(True)
@@ -41,6 +42,8 @@ class ConnectorSpecificationPanel(QWidget):
         self.connector_notes = text_edit_factory("", "Connector notes.")
         self.connector_mode_note = QLabel("COORDINATE OFFSET ONLY\nCONNECTOR RF BEHAVIOR NOT MODELED")
         self.connector_mode_note.setStyleSheet("color:#c4b5fd;")
+        self.connector_mode_note.setContentsMargins(0, 6, 0, 8)
+        self.connector_mode_note.setMinimumHeight(52)
         self.connector_metrics = QLabel("Connector Electrical Length: -\nConnector Delay: -")
         self.connector_metrics.setStyleSheet("color:#93c5fd;")
         self.connector_mode_note.setWordWrap(True)
