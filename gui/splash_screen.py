@@ -131,7 +131,7 @@ class SplashScreen(QWidget):
 
         layout.addStretch(1)
 
-        self.footer = QLabel("Author: RF Cable Optimizer Team    |    Contact: rf_cable_optimizer@asmpt.com")
+        self.footer = QLabel("Author: Victor Huang    |    Contact: victor.huang@asm.com")
         self.footer.setAlignment(Qt.AlignCenter)
         self.footer.setStyleSheet(
             "color: #ede9fe; font-size: 11px; background-color: rgba(30, 41, 59, 0.55); "
@@ -206,5 +206,5 @@ class StartupCoordinator(QObject):
         from gui.main_window import MainWindow
 
         self._main_window = MainWindow()
-        self._main_window.show()
+        self._main_window.showMaximized()
         self._splash.close()

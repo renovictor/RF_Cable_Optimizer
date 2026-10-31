@@ -12,6 +12,14 @@
   - RLGC defaults set to `R'=0.2331`, `L'=2.1945e-7`, `G'=0`, `C'=8.7780e-11`
 - Engineering Summary enhancement:
   - summary text is now selectable/copyable for report use
+- RF Stress Comparison chart readability/layout updates:
+  - rotated bar-chart category labels by 90° to free horizontal plotting space
+- Startup behavior update:
+  - main window now opens maximized after splash loading completes
+- Startup branding update:
+  - splash footer author/contact text updated
+- Application bootstrap update:
+  - app icon is now set at QApplication startup for consistent window icon behavior
 
 ## V2026.10.9 - 2026-10-31
 

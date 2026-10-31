@@ -1920,6 +1920,10 @@ class MainWindow(QMainWindow):
         )
         for ax in bar_axes:
             ax.grid(True, alpha=0.25)
+            for label in ax.get_yticklabels():
+                label.set_rotation(90)
+                label.set_verticalalignment("center")
+                label.set_horizontalalignment("center")
         bar_fig.tight_layout()
         self.stress_bar_canvas.draw_idle()
 
