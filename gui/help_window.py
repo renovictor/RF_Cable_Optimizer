@@ -68,6 +68,39 @@ HELP_HTML = """
 <h2>7. Voltage / Current Distribution</h2>
 <p>Plots include Voltage RMS, Current RMS, Real RF Power, Local Dissipation, and Cumulative Dissipation versus cable position.</p>
 <p>Local maxima can be important for heating or damage investigation. Current maximum alone does not prove a burn location.</p>
+<p>The page has two sub-tabs: <b>Spatial Distribution</b> and <b>Standing-Wave Decomposition</b>.</p>
+
+<h2>7A. Standing-Wave Voltage Decomposition</h2>
+<ol>
+  <li>Match Output Power is normally normalized at the Cable Input plane.</li>
+  <li>A mismatched cable contains forward and reflected traveling waves.</li>
+  <li>Total local voltage is the complex vector sum: <code>Vtotal = Vforward + Vreflected</code>.</li>
+  <li>Voltage maximum occurs where the two voltage phasors reinforce.</li>
+  <li>Voltage minimum occurs where they oppose.</li>
+  <li>High local Vpp does not mean equally high net real power.</li>
+  <li>Forward Power and Reflected Power are not the same as apparent or reactive power.</li>
+  <li>ZL is the cable load at Cable End.</li>
+  <li>Cable internal Vmax and ZL are at different physical positions and must not be directly combined using Vmax / ZL.</li>
+  <li>The Direct-Load Reference is the hypothetical voltage if the same real power were directly applied to ZL without 50-ohm standing-wave transformation.</li>
+  <li>Voltage Enhancement compares distributed cable maximum Vpp to that direct-load reference.</li>
+  <li>Model-to-measurement agreement must be interpreted together with reference-plane and parameter assumptions.</li>
+</ol>
+
+<h2>7B. Forward, Reflected, and Net Power</h2>
+<ol>
+  <li>A mismatched transmission line contains both forward and reflected traveling waves.</li>
+  <li>Forward Traveling-Wave Power represents power associated with the wave traveling toward the load.</li>
+  <li>Reflected Traveling-Wave Power represents power associated with the wave traveling back toward the source.</li>
+  <li>At a given reference plane, net traveling-wave real power is <code>Pnet = Pfwd - Pref</code>.</li>
+  <li>Forward and Reflected Power may each be much larger than net real power in severe mismatch.</li>
+  <li>Reflected Power is not cable dissipation.</li>
+  <li>Reflected Power is not reactive power.</li>
+  <li>Forward Power is not apparent power.</li>
+  <li>In a lossy line, Pfwd and Pref vary with cable position.</li>
+  <li>The Power Flow card displays values at Match Output / Cable Input.</li>
+  <li>Standing-Wave Decomposition shows how Pfwd, Pref, and Pnet change along position.</li>
+  <li>High local voltage can occur when forward and reflected voltage phasors reinforce, even when net real power is much smaller than individual traveling-wave power components.</li>
+</ol>
 
 <h2>8. Probe Position</h2>
 <p>Use <b>Probe Position [m]</b> to inspect Vrms, Vpp, Irms, Real Power, Local Dissipation, and Cumulative Loss at a specific location.</p>

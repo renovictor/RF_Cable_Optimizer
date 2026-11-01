@@ -216,6 +216,13 @@ class MainWindowGuiTests(unittest.TestCase):
         tab_names = [self.window.tabs.tabText(i) for i in range(self.window.tabs.count())]
         self.assertIn("Top feed", tab_names)
         self.assertIn("Bottom feed", tab_names)
+        self.assertIn("Burnt Cable", tab_names)
+
+    def test_burnt_cable_tab_displays_image(self) -> None:
+        self.assertTrue(hasattr(self.window, "burnt_cable_image_label"))
+        pixmap = self.window.burnt_cable_image_label.pixmap()
+        self.assertIsNotNone(pixmap)
+        self.assertFalse(pixmap.isNull())
 
     def test_rf_stress_comparison_subtab_exists(self) -> None:
         subtab_names = [self.window.cable_analysis_subtabs.tabText(i) for i in range(self.window.cable_analysis_subtabs.count())]
@@ -223,12 +230,34 @@ class MainWindowGuiTests(unittest.TestCase):
         self.assertIn("RF Stress Comparison", subtab_names)
         self.assertIn("Smith Chart", subtab_names)
 
+    def test_distribution_has_spatial_and_standing_wave_subtabs(self) -> None:
+        subtab_names = [self.window.distribution_subtabs.tabText(i) for i in range(self.window.distribution_subtabs.count())]
+        self.assertIn("Spatial Distribution", subtab_names)
+        self.assertIn("Standing-Wave Decomposition", subtab_names)
+
     def test_rf_stress_three_reference_columns_are_populated(self) -> None:
         self.window.recalculate()
         self.app.processEvents()
         self.assertIn("MANUFACTURER REFERENCE", self.window.manufacturer_ref_label.text())
         self.assertIn("IDEAL MATCHED REFERENCE", self.window.matched_ref_label.text())
         self.assertIn("ACTUAL DISTRIBUTED RESULT", self.window.actual_ref_label.text())
+
+    def test_power_flow_includes_traveling_wave_card_between_match_output_and_connector(self) -> None:
+        keys = list(self.window.card_labels.keys())
+        self.assertLess(keys.index("match_output"), keys.index("connector_loss"))
+        self.assertTrue(hasattr(self.window, "traveling_wave_card"))
+        text = self.window.traveling_wave_card.text()
+        self.assertIn("TRAVELING-WAVE POWER", text)
+        self.assertIn("Reference Plane", text)
+
+    def test_traveling_wave_card_and_stress_panel_show_forward_reflected_net(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        self.assertIn("FORWARD", self.window.traveling_wave_card.text())
+        self.assertIn("REFLECTED", self.window.traveling_wave_card.text())
+        self.assertIn("NET", self.window.traveling_wave_card.text())
+        self.assertIn("FORWARD", self.window.stress_traveling_wave_label.text())
+        self.assertIn("VSWR", self.window.stress_traveling_wave_label.text())
 
     def test_summary_separates_z22_zout_and_zl_terms(self) -> None:
         self.window.matcher_mode.setCurrentText(MatcherModelMode.USER_S.value)
@@ -265,12 +294,28 @@ class MainWindowGuiTests(unittest.TestCase):
         current_tab = self.window.tabs.tabText(self.window.tabs.currentIndex())
         self.assertEqual(current_tab, "Thermal Analysis")
 
+    def test_open_standing_wave_details_switches_distribution_subtab(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        self.window.open_standing_wave_btn.click()
+        self.app.processEvents()
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.currentIndex()), "Voltage / Current Distribution")
+        self.assertEqual(self.window.distribution_subtabs.tabText(self.window.distribution_subtabs.currentIndex()), "Standing-Wave Decomposition")
+
     def test_vpp_diagnostic_is_separate_from_impedance_division(self) -> None:
         self.window.vpp.setText("500")
         self.window.recalculate()
         self.app.processEvents()
         text = self.window.system_diag.text()
-        self.assertIn("Do not calculate operating load current as Vpp/|Zout| or Vpp/|Z22|", text)
+        self.assertIn("Do not calculate operating load current as Vmax/|ZL|", text)
+
+    def test_probe_detail_includes_traveling_wave_power_values(self) -> None:
+        self.window.recalculate()
+        self.app.processEvents()
+        text = self.window.standing_probe_detail.text()
+        self.assertIn("Forward Traveling-Wave Power at Probe", text)
+        self.assertIn("Reflected Traveling-Wave Power at Probe", text)
+        self.assertIn("Net Real Power at Probe", text)
 
 
 if __name__ == "__main__":

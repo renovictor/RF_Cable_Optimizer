@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 
 from models.cable_parameters import CableModelMode, CableParameters
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
 from models.connector_parameters import ConnectorModelMode, ConnectorParameters
-from models.system_parameters import MatchOutputPowerSource, MatcherModelMode, SystemParameters
+from models.system_parameters import MatchOutputPowerSource, MatcherModelMode, PowerNormalizationPlane, SystemParameters
 from rf.network_cascade import cascade_abcd, input_impedance_from_abcd, transmission_line_abcd
 from rf.power import cumulative_trapezoid, real_power_from_phasors
 from rf.smith_math import gamma_from_impedance, impedance_from_vi, normalized_impedance
@@ -22,6 +23,7 @@ from rf.transmission_line import (
     reflection_coefficient,
     return_loss_db,
     solve_distributed_vi,
+    solve_distributed_vi_components,
     to_db_per_m,
     vswr,
     z0_from_rlgc,
@@ -37,6 +39,9 @@ from rf.two_port import (
 
 
 CURRENT_EPSILON_A = 1e-12
+COMPLEX_Z0_IMAG_RATIO_MAX = 1e-3
+TRAVELING_WAVE_POWER_ABS_TOL_W = 1e-3
+TRAVELING_WAVE_POWER_REL_TOL = 1e-3
 
 
 @dataclass
@@ -57,7 +62,17 @@ class CableAnalysisResult:
     connector_propagation_delay_ns: float | None
     v_rms: np.ndarray
     i_rms: np.ndarray
+    v_forward: np.ndarray
+    v_reflected: np.ndarray
+    i_forward: np.ndarray
+    i_reflected: np.ndarray
+    vpp: np.ndarray
+    p_forward_w: np.ndarray
+    p_reflected_w: np.ndarray
     p_real_w: np.ndarray
+    forward_power_w: np.ndarray
+    reflected_power_w: np.ndarray
+    net_traveling_wave_power_w: np.ndarray
     p_cond_w_per_m: np.ndarray
     p_diel_w_per_m: np.ndarray
     p_total_loss_w_per_m: np.ndarray
@@ -79,6 +94,10 @@ class CableAnalysisResult:
     vswr: float
     return_loss_db: float
     electrical_length_deg: float
+    wavelength_m: float
+    velocity_m_per_s: float
+    alpha_np_per_m: float
+    beta_rad_per_m: float
     match_input_power_w: float
     match_output_power_w: float
     match_output_power_source_label: str
@@ -115,6 +134,35 @@ class CableAnalysisResult:
     loaded_model_v2_rms_v: float | None
     loaded_model_v2_vpp_v: float | None
     measured_vpp_residual_v: float | None
+    power_normalization_plane: str
+    power_normalization_power_w: float
+    traveling_wave_reference_plane: str
+    traveling_wave_available: bool
+    traveling_wave_warning: str | None
+    match_plane_forward_power_w: float | None
+    match_plane_reflected_power_w: float | None
+    match_plane_net_power_w: float | None
+    match_plane_vi_power_w: float | None
+    match_plane_power_residual_w: float | None
+    match_plane_power_residual_percent: float | None
+    max_traveling_wave_vi_residual_w: float | None
+    direct_load_reference_irms_a: float | None
+    direct_load_reference_vrms_v: float | None
+    direct_load_reference_vpp_v: float | None
+    measured_vpp_v: float | None
+    maximum_voltage_rms_v: float
+    maximum_voltage_vpp_v: float
+    maximum_voltage_position_from_match_m: float
+    maximum_voltage_position_from_load_m: float
+    maximum_voltage_section_name: str
+    minimum_voltage_rms_v: float
+    minimum_voltage_vpp_v: float
+    minimum_voltage_position_from_match_m: float
+    minimum_voltage_position_from_load_m: float
+    minimum_voltage_section_name: str
+    vpp_residual_v: float | None
+    vpp_residual_percent: float | None
+    standing_wave_voltage_enhancement: float | None
     min_impedance_index: int | None
     min_impedance_z_m: float | None
     min_impedance_z_ohm: complex | None
@@ -272,6 +320,10 @@ def analyze_cable(
     connector_loss_w: float | None = None
     connector_interface_index: int | None = None
 
+    power_normalization_plane = system.power_normalization_plane
+
+    z0_reference_profile: np.ndarray
+
     if connector_enabled and connector.model_mode == ConnectorModelMode.TRANSMISSION_LINE:
         if connector_length <= 0:
             raise ValueError("Transmission-line connector mode requires connector length > 0.")
@@ -317,19 +369,23 @@ def analyze_cable(
         p_match_input = system.match_input_power_w
         p_match_output, p_match_source, loaded_matcher_solution = _match_output_power(system, z_in)
         p_match_loss = p_match_input - p_match_output
-        connector_input_power_w = p_match_output
-        v0, _ = normalize_boundary_from_real_power(z_in, p_match_output)
+        v0, _ = normalize_boundary_from_real_power(z_in, max(p_match_output, 0.0))
 
         conn_points = max(3, int(points * connector_length / (connector_length + cable_length)))
         cable_points = max(3, points - conn_points + 1)
         z_conn_local = np.linspace(0.0, connector_length, conn_points)
         z_cable_local = np.linspace(0.0, cable_length, cable_points)
-        v_conn, i_conn = solve_distributed_vi(z_conn_local, connector_length, connector_z0, connector_gamma, z_interface, v0)
-
+        vf_conn, vr_conn, if_conn, ir_conn = solve_distributed_vi_components(
+            z_conn_local, connector_length, connector_z0, connector_gamma, z_interface, v0
+        )
+        v_conn = vf_conn + vr_conn
+        i_conn = if_conn + ir_conn
         v_interface = complex(v_conn[-1])
-        v_cable, i_cable = solve_distributed_vi(
+        vf_cable, vr_cable, if_cable, ir_cable = solve_distributed_vi_components(
             z_cable_local, cable_length, cable_z0, cable_gamma, z_load, v_interface
         )
+        v_cable = vf_cable + vr_cable
+        i_cable = if_cable + ir_cable
 
         z_m = np.concatenate([z_conn_local, connector_length + z_cable_local[1:]])
         global_position_m = z_m.copy()
@@ -342,8 +398,37 @@ def analyze_cable(
         )
         connector_interface_index = len(z_conn_local) - 1
 
-        v_rms = np.concatenate([v_conn, v_cable[1:]])
-        i_rms = np.concatenate([i_conn, i_cable[1:]])
+        v_forward = np.concatenate([vf_conn, vf_cable[1:]])
+        v_reflected = np.concatenate([vr_conn, vr_cable[1:]])
+        i_forward = np.concatenate([if_conn, if_cable[1:]])
+        i_reflected = np.concatenate([ir_conn, ir_cable[1:]])
+        z0_reference_profile = np.concatenate(
+            [np.full(len(vf_conn), connector_z0, dtype=complex), np.full(len(vf_cable) - 1, cable_z0, dtype=complex)]
+        )
+        v_rms = v_forward + v_reflected
+        i_rms = i_forward + i_reflected
+
+        p_real_unscaled = real_power_from_phasors(v_rms, i_rms)
+        target_power_w = max(p_match_output, 0.0)
+        ref_idx = 0 if power_normalization_plane == PowerNormalizationPlane.MATCH_OUTPUT_CABLE_INPUT else -1
+        ref_power = float(p_real_unscaled[ref_idx])
+        if target_power_w <= 0.0:
+            scale = 0.0
+        elif ref_power <= 0.0:
+            raise ValueError("Selected power normalization plane has non-positive real power in the unscaled solution.")
+        else:
+            scale = math.sqrt(target_power_w / ref_power)
+        v_forward *= scale
+        v_reflected *= scale
+        i_forward *= scale
+        i_reflected *= scale
+        v_rms = v_forward + v_reflected
+        i_rms = i_forward + i_reflected
+        v_conn *= scale
+        i_conn *= scale
+        v_cable *= scale
+        i_cable *= scale
+
         p_real_w = real_power_from_phasors(v_rms, i_rms)
 
         z_conn_local_ohm = impedance_from_vi(v_conn, i_conn)
@@ -374,6 +459,7 @@ def analyze_cable(
         p_total_loss_w_per_m = np.concatenate([p_conn_total, p_cable_total[1:]])
         p_cumulative_loss_w = cumulative_trapezoid(p_total_loss_w_per_m, z_m)
 
+        connector_input_power_w = float(p_conn_real[0])
         connector_output_power_w = float(p_conn_real[-1])
         connector_loss_w = connector_input_power_w - connector_output_power_w
         flexible_cable_input_power_w = connector_output_power_w
@@ -411,10 +497,31 @@ def analyze_cable(
         p_match_input = system.match_input_power_w
         p_match_output, p_match_source, loaded_matcher_solution = _match_output_power(system, z_in)
         p_match_loss = p_match_input - p_match_output
-        v0, _ = normalize_boundary_from_real_power(z_in, p_match_output)
+        v0, _ = normalize_boundary_from_real_power(z_in, max(p_match_output, 0.0))
         z_m = np.linspace(0.0, line_length, points)
         global_position_m = z_m.copy()
-        v_rms, i_rms = solve_distributed_vi(z_m, line_length, cable_z0, cable_gamma, z_load, v0)
+        v_forward, v_reflected, i_forward, i_reflected = solve_distributed_vi_components(
+            z_m, line_length, cable_z0, cable_gamma, z_load, v0
+        )
+        z0_reference_profile = np.full(len(z_m), cable_z0, dtype=complex)
+        v_rms = v_forward + v_reflected
+        i_rms = i_forward + i_reflected
+        p_real_unscaled = real_power_from_phasors(v_rms, i_rms)
+        target_power_w = max(p_match_output, 0.0)
+        ref_idx = 0 if power_normalization_plane == PowerNormalizationPlane.MATCH_OUTPUT_CABLE_INPUT else -1
+        ref_power = float(p_real_unscaled[ref_idx])
+        if target_power_w <= 0.0:
+            scale = 0.0
+        elif ref_power <= 0.0:
+            raise ValueError("Selected power normalization plane has non-positive real power in the unscaled solution.")
+        else:
+            scale = math.sqrt(target_power_w / ref_power)
+        v_forward *= scale
+        v_reflected *= scale
+        i_forward *= scale
+        i_reflected *= scale
+        v_rms = v_forward + v_reflected
+        i_rms = i_forward + i_reflected
         p_real_w = real_power_from_phasors(v_rms, i_rms)
         z_local_ohm = impedance_from_vi(v_rms, i_rms)
         z_normalized = normalized_impedance(z_local_ohm, cable_z0)
@@ -430,10 +537,11 @@ def analyze_cable(
             p_diel_w_per_m = np.zeros_like(p_total_loss_w_per_m)
 
         p_cumulative_loss_w = cumulative_trapezoid(p_total_loss_w_per_m, z_m)
+        flexible_cable_input_power_w = float(p_real_w[0])
         p_cable_output = float(p_real_w[-1])
         p_chamber = p_cable_output
-        p_cable_loss = p_match_output - p_cable_output
-        p_cable_loss_pct = (p_cable_loss / p_match_output * 100.0) if p_match_output > 0 else 0.0
+        p_cable_loss = flexible_cable_input_power_w - p_cable_output
+        p_cable_loss_pct = (p_cable_loss / flexible_cable_input_power_w * 100.0) if flexible_cable_input_power_w > 0 else 0.0
         p_balance_err = p_match_input - p_match_loss - p_cable_loss - p_chamber
         p_balance_err_pct = (p_balance_err / p_match_input * 100.0) if p_match_input > 0 else 0.0
 
@@ -448,7 +556,6 @@ def analyze_cable(
             section_local_position_m = z_m.copy()
             position_from_flexible_cable_start_m = z_m.copy()
             connector_length = 0.0
-        flexible_cable_input_power_w = p_match_output
         flexible_cable_loss_w = p_cable_loss
         electrical_length_total_deg = electrical_length_deg(frequency_hz, cable.velocity_factor, line_length)
 
@@ -479,6 +586,82 @@ def analyze_cable(
     endpoint_end_delta = z_from_vi_end - z_load
     endpoint_match_rel_error = abs(endpoint_match_delta) / abs(z_in) if abs(z_in) > 0 else float("inf")
     endpoint_end_rel_error = abs(endpoint_end_delta) / abs(z_load) if abs(z_load) > 0 else float("inf")
+
+    z0_real = np.real(z0_reference_profile)
+    z0_imag = np.imag(z0_reference_profile)
+    z0_real_abs = np.maximum(np.abs(z0_real), 1e-12)
+    z0_imag_ratio = np.abs(z0_imag) / z0_real_abs
+    has_significant_complex_z0 = bool(np.any(z0_imag_ratio > COMPLEX_Z0_IMAG_RATIO_MAX))
+    has_nonpositive_real_z0 = bool(np.any(z0_real <= 0.0))
+    traveling_wave_available = not has_significant_complex_z0 and not has_nonpositive_real_z0
+    traveling_wave_warning: str | None = None
+    traveling_wave_reference_plane = "MATCH OUTPUT / CABLE INPUT (z = 0)"
+
+    if traveling_wave_available:
+        forward_power_w = (np.abs(v_forward) ** 2) / z0_real
+        reflected_power_w = (np.abs(v_reflected) ** 2) / z0_real
+        net_traveling_wave_power_w = forward_power_w - reflected_power_w
+        match_plane_forward_power_w = float(forward_power_w[0])
+        match_plane_reflected_power_w = float(reflected_power_w[0])
+        match_plane_net_power_w = float(net_traveling_wave_power_w[0])
+        match_plane_vi_power_w = float(p_real_w[0])
+        match_plane_power_residual_w = float(match_plane_net_power_w - p_match_output)
+        match_plane_power_residual_percent = (
+            float(100.0 * match_plane_power_residual_w / p_match_output) if abs(p_match_output) > 1e-12 else 0.0
+        )
+        max_traveling_wave_vi_residual_w = float(np.max(np.abs(net_traveling_wave_power_w - p_real_w)))
+        p_forward_w = forward_power_w
+        p_reflected_w = reflected_power_w
+    else:
+        forward_power_w = np.full_like(p_real_w, np.nan, dtype=float)
+        reflected_power_w = np.full_like(p_real_w, np.nan, dtype=float)
+        net_traveling_wave_power_w = np.full_like(p_real_w, np.nan, dtype=float)
+        p_forward_w = forward_power_w
+        p_reflected_w = reflected_power_w
+        match_plane_forward_power_w = None
+        match_plane_reflected_power_w = None
+        match_plane_net_power_w = None
+        match_plane_vi_power_w = None
+        match_plane_power_residual_w = None
+        match_plane_power_residual_percent = None
+        max_traveling_wave_vi_residual_w = None
+        if has_nonpositive_real_z0:
+            traveling_wave_warning = (
+                "TRAVELING-WAVE POWER DECOMPOSITION NOT AVAILABLE FOR NON-POSITIVE Re(Z0) IN CURRENT CONVENTION."
+            )
+        else:
+            traveling_wave_warning = (
+                "TRAVELING-WAVE POWER DECOMPOSITION NOT AVAILABLE FOR CURRENT COMPLEX-Z0 CONVENTION."
+            )
+
+    vpp = 2.0 * np.sqrt(2.0) * np.abs(v_rms)
+
+    rl = float(z_load.real)
+    if p_match_output > 0.0 and rl > 0.0:
+        direct_i_rms = float(math.sqrt(p_match_output / rl))
+        direct_v_rms = float(direct_i_rms * abs(z_load))
+        direct_vpp = float(2.0 * math.sqrt(2.0) * direct_v_rms)
+    else:
+        direct_i_rms = None
+        direct_v_rms = None
+        direct_vpp = None
+
+    vmax_idx = int(np.argmax(np.abs(v_rms)))
+    vmin_idx = int(np.argmin(np.abs(v_rms)))
+    z_total = float(z_m[-1])
+    max_vrms = float(np.abs(v_rms[vmax_idx]))
+    max_vpp = float(vpp[vmax_idx])
+    min_vrms = float(np.abs(v_rms[vmin_idx]))
+    min_vpp = float(vpp[vmin_idx])
+    measured_vpp = system.measured_vpp_v
+    vpp_residual_v = (max_vpp - measured_vpp) if measured_vpp is not None else None
+    vpp_residual_percent = (vpp_residual_v / measured_vpp * 100.0) if (measured_vpp is not None and measured_vpp != 0) else None
+    standing_wave_voltage_enhancement = (max_vpp / direct_vpp) if (direct_vpp is not None and direct_vpp > 0) else None
+
+    velocity_m_per_s = float(cable.velocity_factor * C0)
+    wavelength_m = float(velocity_m_per_s / frequency_hz)
+    alpha_np_per_m = float(np.real(cable_gamma))
+    beta_rad_per_m = float(np.imag(cable_gamma))
 
     i_abs = np.abs(i_rms)
     z_abs = np.abs(z_local_ohm)
@@ -551,6 +734,14 @@ def analyze_cable(
             f"Endpoint mismatch at z=L exceeds threshold: rel err={endpoint_end_rel_error:.3e}, "
             f"Delta_Z={endpoint_end_delta.real:+.4g}{endpoint_end_delta.imag:+.4g}j ohm."
         )
+    if traveling_wave_warning is not None:
+        warnings.append(traveling_wave_warning)
+    if traveling_wave_available and match_plane_power_residual_w is not None:
+        allowed_residual_w = max(TRAVELING_WAVE_POWER_ABS_TOL_W, TRAVELING_WAVE_POWER_REL_TOL * max(abs(p_match_output), 1.0))
+        if abs(match_plane_power_residual_w) > allowed_residual_w:
+            warnings.append("TRAVELING-WAVE POWER CONSISTENCY WARNING")
+
+    power_normalization_power_w = float(p_real_w[0]) if power_normalization_plane == PowerNormalizationPlane.MATCH_OUTPUT_CABLE_INPUT else float(p_real_w[-1])
 
     return CableAnalysisResult(
         z_m=z_m,
@@ -569,7 +760,17 @@ def analyze_cable(
         connector_propagation_delay_ns=connector_propagation_delay_ns,
         v_rms=v_rms,
         i_rms=i_rms,
+        v_forward=v_forward,
+        v_reflected=v_reflected,
+        i_forward=i_forward,
+        i_reflected=i_reflected,
+        vpp=vpp,
+        p_forward_w=p_forward_w,
+        p_reflected_w=p_reflected_w,
         p_real_w=p_real_w,
+        forward_power_w=forward_power_w,
+        reflected_power_w=reflected_power_w,
+        net_traveling_wave_power_w=net_traveling_wave_power_w,
         p_cond_w_per_m=p_cond_w_per_m,
         p_diel_w_per_m=p_diel_w_per_m,
         p_total_loss_w_per_m=p_total_loss_w_per_m,
@@ -591,6 +792,10 @@ def analyze_cable(
         vswr=vswr(gl),
         return_loss_db=return_loss_db(gl),
         electrical_length_deg=electrical_length_total_deg,
+        wavelength_m=wavelength_m,
+        velocity_m_per_s=velocity_m_per_s,
+        alpha_np_per_m=alpha_np_per_m,
+        beta_rad_per_m=beta_rad_per_m,
         match_input_power_w=p_match_input,
         match_output_power_w=p_match_output,
         match_output_power_source_label=p_match_source,
@@ -615,7 +820,7 @@ def analyze_cable(
         z11_ohm=z11_ohm,
         z12_ohm=z12_ohm,
         z21_ohm=z21_ohm,
-        load_impedance_zl=z_in,
+        load_impedance_zl=z_load,
         conjugate_zout_target=conjugate_zout_target,
         conjugate_match_delta_z=conjugate_match_delta_z,
         conjugate_match_delta_r_ohm=conjugate_match_delta_r_ohm,
@@ -633,6 +838,35 @@ def analyze_cable(
             if (loaded_matcher_solution is not None and system.measured_vpp_v is not None)
             else None
         ),
+        power_normalization_plane=power_normalization_plane.value,
+        power_normalization_power_w=power_normalization_power_w,
+        traveling_wave_reference_plane=traveling_wave_reference_plane,
+        traveling_wave_available=traveling_wave_available,
+        traveling_wave_warning=traveling_wave_warning,
+        match_plane_forward_power_w=match_plane_forward_power_w,
+        match_plane_reflected_power_w=match_plane_reflected_power_w,
+        match_plane_net_power_w=match_plane_net_power_w,
+        match_plane_vi_power_w=match_plane_vi_power_w,
+        match_plane_power_residual_w=match_plane_power_residual_w,
+        match_plane_power_residual_percent=match_plane_power_residual_percent,
+        max_traveling_wave_vi_residual_w=max_traveling_wave_vi_residual_w,
+        direct_load_reference_irms_a=direct_i_rms,
+        direct_load_reference_vrms_v=direct_v_rms,
+        direct_load_reference_vpp_v=direct_vpp,
+        measured_vpp_v=measured_vpp,
+        maximum_voltage_rms_v=max_vrms,
+        maximum_voltage_vpp_v=max_vpp,
+        maximum_voltage_position_from_match_m=float(z_m[vmax_idx]),
+        maximum_voltage_position_from_load_m=z_total - float(z_m[vmax_idx]),
+        maximum_voltage_section_name=str(section_name[vmax_idx]),
+        minimum_voltage_rms_v=min_vrms,
+        minimum_voltage_vpp_v=min_vpp,
+        minimum_voltage_position_from_match_m=float(z_m[vmin_idx]),
+        minimum_voltage_position_from_load_m=z_total - float(z_m[vmin_idx]),
+        minimum_voltage_section_name=str(section_name[vmin_idx]),
+        vpp_residual_v=vpp_residual_v,
+        vpp_residual_percent=vpp_residual_percent,
+        standing_wave_voltage_enhancement=standing_wave_voltage_enhancement,
         min_impedance_index=min_impedance_index,
         min_impedance_z_m=min_impedance_z_m,
         min_impedance_z_ohm=min_impedance_z_ohm,

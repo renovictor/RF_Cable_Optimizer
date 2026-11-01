@@ -1,5 +1,11 @@
 # Changelog
 
+## V2026.11.2 - 2026-11-01
+
+- Added Traveling-Wave Power decomposition integration across Cable Analysis, Standing-Wave Decomposition, RF Stress Comparison, Engineering Summary, and CSV export.
+- Added analysis-layer Forward/Reflected/Net traveling-wave power fields at the Match Output / Cable Input reference plane with explicit consistency residual checks and conservative complex-Z0 handling.
+- Added help/documentation updates and expanded regression/GUI test coverage for traveling-wave power behavior and presentation.
+
 ## V2026.11.1 - 2026-11-01
 
 - Wrapped the standing-wave decomposition and direct-load reference integration as the next release.

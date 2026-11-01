@@ -46,7 +46,13 @@ from models.cable_parameters import AttenuationUnit, CableModelMode, CableParame
 from models.chamber_parameters import ChamberImpedanceMode, ChamberParameters
 from models.connector_parameters import ConnectorModelMode, ConnectorParameters, HistoricalCoordinateReference
 from models.operating_points import find_operating_point
-from models.system_parameters import ComplexImpedance, MatchOutputPowerSource, MatcherModelMode, SystemParameters
+from models.system_parameters import (
+    ComplexImpedance,
+    MatchOutputPowerSource,
+    MatcherModelMode,
+    PowerNormalizationPlane,
+    SystemParameters,
+)
 from models.validation import validate_inputs
 from rf.coax import inner_diameter_for_target_z0, z0_from_geometry
 from rf.smith_math import vswr_from_gamma
@@ -104,6 +110,7 @@ class MainWindow(QMainWindow):
         self._build_summary_tab()
         self._build_feed_image_tab("Top feed", "Top_feed.png", "top_feed_image_label")
         self._build_feed_image_tab("Bottom feed", "Bottom_feed.png", "bottom_feed_image_label")
+        self._build_feed_image_tab("Burnt Cable", "burnt_cable.png", "burnt_cable_image_label")
         self._create_menu_bar()
 
         self._ui_ready = True
@@ -130,6 +137,11 @@ class MainWindow(QMainWindow):
         export_stress_action.triggered.connect(self.export_rf_stress_dashboard_image)
         file_menu.addAction(export_stress_action)
         self.export_stress_action = export_stress_action
+
+        export_standing_wave_action = QAction("Export Standing-Wave Decomposition Image", self)
+        export_standing_wave_action.triggered.connect(self.export_standing_wave_image)
+        file_menu.addAction(export_standing_wave_action)
+        self.export_standing_wave_action = export_standing_wave_action
 
         exit_action = QAction("Exit", self)
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
@@ -231,6 +243,10 @@ class MainWindow(QMainWindow):
         self.power_source = QComboBox()
         self.power_source.addItems([s.value for s in MatchOutputPowerSource])
         self.power_source.currentTextChanged.connect(self._on_matcher_mode_changed)
+        self.power_normalization_plane = QComboBox()
+        self.power_normalization_plane.addItems([p.value for p in PowerNormalizationPlane])
+        self.power_normalization_plane.setCurrentText(PowerNormalizationPlane.MATCH_OUTPUT_CABLE_INPUT.value)
+        self.power_normalization_plane.currentTextChanged.connect(lambda _text: self.recalculate())
         self.zm_r = _line_edit("3", "Historical / operating-point load resistance RL [ohm].")
         self.zm_x = _line_edit("19", "Historical / operating-point load reactance XL [ohm].")
         self.vpp = _line_edit("", "Measured Vpp at Match Output [V]. Optional.")
@@ -253,6 +269,7 @@ class MainWindow(QMainWindow):
         sys.addRow("Source Impedance ZS [ohm] (R, X)", self._pair_widget(self.z_gen, self.z_gen_x))
         sys.addRow("Calculated Match Output Power [W]", self.p_match_out)
         sys.addRow("Match Output Power Mode", self.power_source)
+        sys.addRow("Power Normalization Plane", self.power_normalization_plane)
         sys.addRow("Match Efficiency [%]", self.match_eff)
         sys.addRow("Load R, RL [ohm]", self.zm_r)
         sys.addRow("Load X, XL [ohm]", self.zm_x)
@@ -317,24 +334,43 @@ class MainWindow(QMainWindow):
         cards = QGroupBox("Power Flow")
         cg = QGridLayout(cards)
         self.card_labels: dict[str, QLabel] = {}
-        for idx, (title, target, color) in enumerate(
-            [
-                ("MATCH INPUT POWER", "match_input", "#3b82f6"),
-                ("MATCH OUTPUT POWER", "match_output", "#22d3ee"),
-                ("CONNECTOR DISSIPATION", "connector_loss", "#a855f7"),
-                ("FLEXIBLE CABLE INPUT POWER", "flex_input", "#60a5fa"),
-                ("FLEXIBLE CABLE DISSIPATION", "cable_loss", "#ef4444"),
-                ("CABLE END DELIVERED POWER", "chamber", "#22c55e"),
-            ]
-        ):
+        flow_cards = [
+            ("MATCH INPUT POWER", "match_input", "#3b82f6"),
+            ("MATCH OUTPUT POWER", "match_output", "#22d3ee"),
+            ("CONNECTOR DISSIPATION", "connector_loss", "#a855f7"),
+            ("FLEXIBLE CABLE INPUT POWER", "flex_input", "#60a5fa"),
+            ("FLEXIBLE CABLE DISSIPATION", "cable_loss", "#ef4444"),
+            ("CABLE END DELIVERED POWER", "chamber", "#22c55e"),
+        ]
+        for idx, (title, target, color) in enumerate(flow_cards):
+            if idx == 2:
+                self.traveling_wave_card = QLabel(
+                    "TRAVELING-WAVE POWER\n"
+                    "Reference Plane: Match Output / Cable Input\n"
+                    "FORWARD  -\n"
+                    "REFLECTED  -\n"
+                    "NET  -\n"
+                    "Pfwd - Pref = Pnet"
+                )
+                self.traveling_wave_card.setStyleSheet(
+                    "color:#e2e8f0; border:1px solid #0f766e; border-radius:10px; padding:12px; background:#0b1220;"
+                )
+                self.traveling_wave_card.setMinimumWidth(320)
+                self.traveling_wave_card.setToolTip(
+                    "Forward and Reflected values are counter-propagating traveling-wave power components at the displayed "
+                    "reference plane. Their difference is the net real-power flow for the active transmission-line model. "
+                    "Reflected Power is not Cable Dissipation or Reactive Power."
+                )
+                cg.addWidget(self.traveling_wave_card, idx // 3, idx % 3, 1, 1)
             t = QLabel(f"{title}\n-")
             t.setStyleSheet(f"color:{color}; border:1px solid #334155; border-radius:8px; padding:10px;")
             self.card_labels[target] = t
-            cg.addWidget(t, idx // 3, idx % 3, 1, 1)
+            display_idx = idx if idx < 2 else idx + 1
+            cg.addWidget(t, display_idx // 3, display_idx % 3, 1, 1)
 
         self.efficiency_label = QLabel("Matcher Efficiency: -\nCable Efficiency: -\nOverall Delivery Efficiency: -")
         self.efficiency_label.setStyleSheet("color:#93c5fd;")
-        cg.addWidget(self.efficiency_label, 2, 0, 1, 3)
+        cg.addWidget(self.efficiency_label, 3, 0, 1, 3)
 
         self.stress_metrics_label = QLabel("Run analysis to view max voltage/current/local dissipation.")
         self.stress_metrics_label.setStyleSheet("color:#cbd5e1;")
@@ -621,6 +657,28 @@ class MainWindow(QMainWindow):
         cards_layout.addWidget(self.interpretation_label, 1, 0, 1, 3)
         layout.addWidget(cards)
 
+        standing_wave_summary = QGroupBox("STANDING-WAVE VOLTAGE")
+        standing_layout = QVBoxLayout(standing_wave_summary)
+        self.standing_wave_summary_label = QLabel("Run analysis to populate standing-wave voltage summary.")
+        self.standing_wave_summary_label.setStyleSheet("color:#93c5fd;")
+        self.standing_wave_summary_label.setWordWrap(True)
+        self.stress_traveling_wave_label = QLabel(
+            "TRAVELING-WAVE POWER (MATCH OUTPUT / CABLE INPUT)\n"
+            "FORWARD -\n"
+            "REFLECTED -\n"
+            "NET -\n"
+            "|Gamma| -\n"
+            "VSWR -"
+        )
+        self.stress_traveling_wave_label.setWordWrap(True)
+        self.stress_traveling_wave_label.setStyleSheet("color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px;")
+        self.open_standing_wave_btn = QPushButton("View Standing-Wave Details")
+        self.open_standing_wave_btn.clicked.connect(self._open_standing_wave_details)
+        standing_layout.addWidget(self.standing_wave_summary_label)
+        standing_layout.addWidget(self.stress_traveling_wave_label)
+        standing_layout.addWidget(self.open_standing_wave_btn)
+        layout.addWidget(standing_wave_summary)
+
         actions_row = QHBoxLayout()
         self.open_thermal_hotspot_btn = QPushButton("OPEN THERMAL ANALYSIS AT HOT SPOT")
         self.open_thermal_hotspot_btn.clicked.connect(self._open_thermal_analysis_at_hot_spot)
@@ -655,6 +713,12 @@ class MainWindow(QMainWindow):
         tab = QWidget()
         self.tabs.addTab(tab, "Voltage / Current Distribution")
         layout = QVBoxLayout(tab)
+
+        self.distribution_subtabs = QTabWidget()
+        layout.addWidget(self.distribution_subtabs, 1)
+
+        spatial_tab = QWidget()
+        spatial_layout = QVBoxLayout(spatial_tab)
         probe_row = QHBoxLayout()
         self.probe_pos = _line_edit("0.15", "Probe position from Match Output [m].")
         self.probe_pos.setMaximumWidth(90)
@@ -680,7 +744,7 @@ class MainWindow(QMainWindow):
         probe_row.addWidget(self.probe_slider, 3)
         self.probe_values = QLabel("Probe: Input Required")
         probe_row.addWidget(self.probe_values, 2)
-        layout.addLayout(probe_row)
+        spatial_layout.addLayout(probe_row)
 
         positions_row = QHBoxLayout()
         self.multi_positions = QLineEdit("0.05,0.10,0.15,0.20,0.50,1.00")
@@ -688,7 +752,7 @@ class MainWindow(QMainWindow):
         self.multi_positions.editingFinished.connect(self._refresh_probe_table)
         positions_row.addWidget(QLabel("Measurement Positions [m]"))
         positions_row.addWidget(self.multi_positions, 1)
-        layout.addLayout(positions_row)
+        spatial_layout.addLayout(positions_row)
 
         self.probe_table = QTableWidget(0, 8)
         self.probe_table.setHorizontalHeaderLabels(
@@ -704,10 +768,40 @@ class MainWindow(QMainWindow):
             ]
         )
         self.probe_table.itemSelectionChanged.connect(self._on_probe_table_selection_changed)
-        layout.addWidget(self.probe_table, 1)
+        spatial_layout.addWidget(self.probe_table, 1)
 
         self.dist_canvas = MplCanvas(width=12, height=9, dpi=100)
-        layout.addWidget(self.dist_canvas, 4)
+        spatial_layout.addWidget(self.dist_canvas, 4)
+        self.distribution_subtabs.addTab(spatial_tab, "Spatial Distribution")
+
+        standing_tab = QWidget()
+        standing_layout = QVBoxLayout(standing_tab)
+        summary_cards = QGridLayout()
+        self.standing_direct_card = QLabel("DIRECT-LOAD REFERENCE\nNot Available")
+        self.standing_direct_card.setStyleSheet("color:#93c5fd; border:1px solid #334155; border-radius:8px; padding:10px;")
+        self.standing_max_card = QLabel("CABLE MAXIMUM VPP\nNot Available")
+        self.standing_max_card.setStyleSheet("color:#fb923c; border:1px solid #7c2d12; border-radius:8px; padding:10px;")
+        self.standing_measured_card = QLabel("MEASURED VPP\nNot Available")
+        self.standing_measured_card.setStyleSheet("color:#4ade80; border:1px solid #14532d; border-radius:8px; padding:10px;")
+        self.standing_residual_card = QLabel("MODEL VPP RESIDUAL\nNot Available")
+        self.standing_residual_card.setStyleSheet("color:#facc15; border:1px solid #854d0e; border-radius:8px; padding:10px;")
+        summary_cards.addWidget(self.standing_direct_card, 0, 0)
+        summary_cards.addWidget(self.standing_max_card, 0, 1)
+        summary_cards.addWidget(self.standing_measured_card, 1, 0)
+        summary_cards.addWidget(self.standing_residual_card, 1, 1)
+        standing_layout.addLayout(summary_cards)
+
+        self.standing_wave_canvas = MplCanvas(width=12, height=6, dpi=100)
+        self._standing_wave_click_cid = self.standing_wave_canvas.mpl_connect("button_press_event", self._on_standing_wave_click)
+        standing_layout.addWidget(self.standing_wave_canvas, 3)
+        self.standing_probe_detail = QLabel("Run analysis to view standing-wave decomposition.")
+        self.standing_probe_detail.setWordWrap(True)
+        self.standing_probe_detail.setStyleSheet("color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px;")
+        standing_layout.addWidget(self.standing_probe_detail, 1)
+        self.export_standing_wave_btn = QPushButton("Export Standing-Wave Decomposition Image")
+        self.export_standing_wave_btn.clicked.connect(self.export_standing_wave_image)
+        standing_layout.addWidget(self.export_standing_wave_btn, 0)
+        self.distribution_subtabs.addTab(standing_tab, "Standing-Wave Decomposition")
 
     def _build_thermal_tab(self) -> None:
         tab = QWidget()
@@ -1080,6 +1174,12 @@ class MainWindow(QMainWindow):
             return None
 
     @staticmethod
+    def _format_power_w(power_w: float) -> str:
+        if abs(power_w) >= 1000.0:
+            return f"{power_w / 1000.0:.3f} kW"
+        return f"{power_w:.2f} W"
+
+    @staticmethod
     def _parse_required_float(text: str, field_name: str) -> float:
         value = text.strip()
         if not value:
@@ -1266,6 +1366,7 @@ class MainWindow(QMainWindow):
             match_efficiency_percent=match_efficiency_percent,
             match_output_power_source=source,
             matcher_model_mode=matcher_mode,
+            power_normalization_plane=PowerNormalizationPlane(self.power_normalization_plane.currentText()),
             match_output_power_w=self._as_float_or_none(self.p_match_out.text()),
             match_output_impedance=ComplexImpedance(
                 self._parse_required_float(self.zm_r.text(), "Historical Load R, RL"),
@@ -1431,8 +1532,8 @@ class MainWindow(QMainWindow):
                 and result.load_impedance_zl is not None
                 and chamber.mode != ChamberImpedanceMode.MEASURED_OR_USER_LOAD
             ):
-                self.zm_r.setText(f"{result.load_impedance_zl.real:.6g}")
-                self.zm_x.setText(f"{result.load_impedance_zl.imag:.6g}")
+                self.zm_r.setText(f"{result.load_impedance_zl.real:.9g}")
+                self.zm_x.setText(f"{result.load_impedance_zl.imag:.9g}")
             self._update_cards(result, system)
             all_warnings = valid.warnings + result.warnings
             if "IDEAL MATCHER - NO MATCH LOSS ASSUMED" in result.match_output_power_source_label:
@@ -1448,6 +1549,7 @@ class MainWindow(QMainWindow):
             probe_clamped = min(max(probe_global, 0.0), float(result.z_m[-1]))
             self._set_probe_display_from_global(probe_clamped)
             self._draw_distribution()
+            self._draw_standing_wave_decomposition()
             self._update_smith_chart_full()
             self._update_stress_dashboard()
             self._update_summary(result, system)
@@ -1470,20 +1572,16 @@ class MainWindow(QMainWindow):
             return (
                 "Reference-plane / measurement consistency check\n"
                 f"Measured Vpp={system.measured_vpp_v:.2f} V, Measured Vrms={measured_vrms:.2f} V\n"
-                "Loaded-model V2 is unavailable."
+                "Standing-wave model result is unavailable."
             )
-        loaded_vrms = result.loaded_model_v2_rms_v
-        loaded_vpp = result.loaded_model_v2_vpp_v
-        residual = result.measured_vpp_residual_v
-        loaded_text = f"{loaded_vrms:.2f} V" if loaded_vrms is not None else "N/A"
-        loaded_vpp_text = f"{loaded_vpp:.2f} V" if loaded_vpp is not None else "N/A"
-        residual_text = f"{residual:+.2f} V" if residual is not None else "N/A"
+        residual_text = f"{result.vpp_residual_v:+.2f} V" if result.vpp_residual_v is not None else "N/A"
+        residual_pct_text = f"{result.vpp_residual_percent:+.2f}%" if result.vpp_residual_percent is not None else "N/A"
         return (
             "Reference-plane / measurement consistency check\n"
             f"Measured Vpp={system.measured_vpp_v:.2f} V, Measured Vrms={measured_vrms:.2f} V\n"
-            f"Loaded-model V2 RMS={loaded_text}, Loaded-model V2 Vpp={loaded_vpp_text}\n"
-            f"Vpp residual (Measured - Loaded)={residual_text}\n"
-            "Do not calculate operating load current as Vpp/|Zout| or Vpp/|Z22|."
+            f"Calculated Maximum Distributed Vpp={result.maximum_voltage_vpp_v:.2f} V\n"
+            f"MODEL-TO-MEASUREMENT VPP RESIDUAL (Calculated - Measured)={residual_text} ({residual_pct_text})\n"
+            "Do not calculate operating load current as Vmax/|ZL| unless both are at the same physical plane."
         )
 
     @staticmethod
@@ -1499,7 +1597,6 @@ class MainWindow(QMainWindow):
         )
 
     def _update_cards(self, r: CableAnalysisResult, system: SystemParameters) -> None:
-        vmax_idx = int(np.argmax(np.abs(r.v_rms)))
         wmax_idx = int(np.argmax(r.p_total_loss_w_per_m))
         eta_match = (r.match_output_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
         cable_ref_power = r.flexible_cable_input_power_w if r.flexible_cable_input_power_w > 0 else r.match_output_power_w
@@ -1507,6 +1604,41 @@ class MainWindow(QMainWindow):
         eta_total = (r.chamber_power_w / r.match_input_power_w * 100.0) if r.match_input_power_w > 0 else 0.0
         self.card_labels["match_input"].setText(f"MATCH INPUT POWER\n{r.match_input_power_w:.2f} W")
         self.card_labels["match_output"].setText(f"MATCH OUTPUT POWER\n{r.match_output_power_w:.2f} W")
+        if r.traveling_wave_available and r.match_plane_forward_power_w is not None and r.match_plane_reflected_power_w is not None:
+            fwd_text = self._format_power_w(r.match_plane_forward_power_w)
+            ref_text = self._format_power_w(r.match_plane_reflected_power_w)
+            net_text = self._format_power_w(r.match_plane_net_power_w if r.match_plane_net_power_w is not None else float("nan"))
+            residual_text = (
+                f"{r.match_plane_power_residual_w:+.4f} W ({r.match_plane_power_residual_percent:+.4f}%)"
+                if r.match_plane_power_residual_w is not None and r.match_plane_power_residual_percent is not None
+                else "N/A"
+            )
+            warning_text = "\nTRAVELING-WAVE POWER CONSISTENCY WARNING" if "TRAVELING-WAVE POWER CONSISTENCY WARNING" in r.warnings else ""
+            self.traveling_wave_card.setText(
+                "TRAVELING-WAVE POWER\n"
+                "Reference Plane:\n"
+                "Match Output / Cable Input\n"
+                f"FORWARD     {fwd_text}  ------>\n"
+                f"REFLECTED   {ref_text}  <------\n"
+                f"NET         {net_text}  ---->\n"
+                "Pfwd - Pref = Pnet\n"
+                f"Residual vs Match Output: {residual_text}"
+                f"{warning_text}"
+            )
+            self.traveling_wave_card.setToolTip(
+                "Forward and Reflected values are counter-propagating traveling-wave power components at the displayed "
+                "reference plane. Their difference is the net real-power flow for the active transmission-line model. "
+                "Reflected Power is not Cable Dissipation or Reactive Power.\n\n"
+                "Net real power equals Forward Traveling-Wave Power minus Reflected Traveling-Wave Power at this reference plane."
+            )
+        else:
+            warning_text = r.traveling_wave_warning or "TRAVELING-WAVE POWER DECOMPOSITION NOT AVAILABLE."
+            self.traveling_wave_card.setText(
+                "TRAVELING-WAVE POWER\n"
+                "Reference Plane:\n"
+                "Match Output / Cable Input\n"
+                f"{warning_text}"
+            )
         if r.connector_enabled and r.connector_mode == ConnectorModelMode.TRANSMISSION_LINE.value and r.connector_loss_w is not None:
             self.card_labels["connector_loss"].setText(f"CONNECTOR DISSIPATION\n{r.connector_loss_w:.2f} W")
             self.card_labels["flex_input"].setText(f"FLEXIBLE CABLE INPUT POWER\n{r.flexible_cable_input_power_w:.2f} W")
@@ -1526,7 +1658,7 @@ class MainWindow(QMainWindow):
         if r.max_current_index is not None and r.max_current_irms_a is not None and r.max_current_z_m is not None:
             max_current_text = f"{r.max_current_irms_a:.2f} Arms @ {r.max_current_z_m:.3f} m"
         self.stress_metrics_label.setText(
-            f"MAX VOLTAGE: {np.abs(r.v_rms[vmax_idx]):.2f} Vrms @ {r.z_m[vmax_idx]:.3f} m   |   "
+            f"MAX VOLTAGE: {r.maximum_voltage_rms_v:.2f} Vrms @ {r.maximum_voltage_position_from_match_m:.3f} m   |   "
             f"MAX CURRENT: {max_current_text}   |   "
             f"MAX LOCAL DISSIPATION: {r.p_total_loss_w_per_m[wmax_idx]:.3f} W/m @ {r.z_m[wmax_idx]:.3f} m"
         )
@@ -1554,6 +1686,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_standing_wave_decomposition()
         self._draw_stress_dashboard()
 
     def _open_thermal_analysis_at_hot_spot(self) -> None:
@@ -1577,6 +1710,14 @@ class MainWindow(QMainWindow):
                 break
         self._update_thermal_analysis()
 
+    def _open_standing_wave_details(self) -> None:
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Voltage / Current Distribution":
+                self.tabs.setCurrentIndex(i)
+                break
+        if hasattr(self, "distribution_subtabs"):
+            self.distribution_subtabs.setCurrentIndex(1)
+
     def _on_stress_bar_click(self, event) -> None:
         if self.last_result is None or event.inaxes is None:
             return
@@ -1597,6 +1738,7 @@ class MainWindow(QMainWindow):
             self._update_probe_readout()
             self._update_smith_probe_only()
             self._draw_distribution()
+            self._draw_standing_wave_decomposition()
             self._draw_stress_dashboard()
 
     def _update_stress_dashboard(self) -> None:
@@ -1654,6 +1796,9 @@ class MainWindow(QMainWindow):
         self.actual_ref_label.setText(
             "ACTUAL DISTRIBUTED RESULT\n"
             f"Actual Match Output Power: {r.match_output_power_w:.2f} W\n"
+            f"Forward Traveling-Wave Power (z=0): {r.match_plane_forward_power_w if r.match_plane_forward_power_w is not None else 'N/A'} W\n"
+            f"Reflected Traveling-Wave Power (z=0): {r.match_plane_reflected_power_w if r.match_plane_reflected_power_w is not None else 'N/A'} W\n"
+            f"Net Real Power (z=0): {r.match_plane_net_power_w if r.match_plane_net_power_w is not None else 'N/A'} W\n"
             f"Actual VSWR: {r.vswr:.3f}\n"
             f"Maximum RMS Current: {s.actual_max_current_rms_a:.3f} A @ {s.actual_max_current_position_m:.3f} m\n"
             f"Section: {max_i_section}\n"
@@ -1690,6 +1835,33 @@ class MainWindow(QMainWindow):
             f"Actual Maximum Voltage: {s.actual_max_voltage_rms_v:.2f} Vrms\n"
             f"Position: {s.actual_max_voltage_position_m:.3f} m"
         )
+        direct_ref_text = f"{r.direct_load_reference_vpp_v / 1000.0:.3f} kVpp" if r.direct_load_reference_vpp_v is not None else "N/A"
+        actual_text = f"{r.maximum_voltage_vpp_v / 1000.0:.3f} kVpp"
+        measured_text = f"{r.measured_vpp_v / 1000.0:.3f} kVpp" if r.measured_vpp_v is not None else "N/A"
+        residual_pct_text = f"{r.vpp_residual_percent:+.2f}%" if r.vpp_residual_percent is not None else "N/A"
+        enhancement_text = f"{r.standing_wave_voltage_enhancement:.2f} x" if r.standing_wave_voltage_enhancement is not None else "N/A"
+        self.standing_wave_summary_label.setText(
+            f"Direct-Load Reference: {direct_ref_text}\n"
+            f"Actual Distributed Maximum: {actual_text}\n"
+            f"Measured: {measured_text}\n"
+            f"Voltage Enhancement: {enhancement_text}\n"
+            f"Model Residual: {residual_pct_text}"
+        )
+        if r.traveling_wave_available and r.match_plane_forward_power_w is not None and r.match_plane_reflected_power_w is not None:
+            net_power = r.match_plane_net_power_w if r.match_plane_net_power_w is not None else float("nan")
+            self.stress_traveling_wave_label.setText(
+                "TRAVELING-WAVE POWER (MATCH OUTPUT / CABLE INPUT)\n"
+                f"FORWARD   {self._format_power_w(r.match_plane_forward_power_w)}  ->\n"
+                f"REFLECTED {self._format_power_w(r.match_plane_reflected_power_w)}  <-\n"
+                f"NET       {self._format_power_w(net_power)}  ->\n"
+                f"|Gamma|   {abs(r.gamma_l):.3f}\n"
+                f"VSWR      {r.vswr:.2f}"
+            )
+        else:
+            self.stress_traveling_wave_label.setText(
+                "TRAVELING-WAVE POWER (MATCH OUTPUT / CABLE INPUT)\n"
+                "NOT AVAILABLE FOR CURRENT COMPLEX-Z0 CONVENTION"
+            )
         self.interpretation_label.setText(
             s.interpretation_text
             + "\nThis comparison does not represent a manufacturer current limit or a temperature prediction."
@@ -1876,6 +2048,160 @@ class MainWindow(QMainWindow):
         self._draw_probe_markers(axes)
         fig.tight_layout()
         self.dist_canvas.draw_idle()
+
+    def _draw_standing_wave_decomposition(self) -> None:
+        if self.last_result is None:
+            return
+        r = self.last_result
+        self.standing_direct_card.setText(
+            "DIRECT-LOAD REFERENCE\n"
+            f"Direct-load Vpp: {r.direct_load_reference_vpp_v:.2f} V\n"
+            f"Direct-load Vrms: {r.direct_load_reference_vrms_v:.2f} V\n"
+            f"ZL (Cable End): {r.z_load.real:+.3f}{r.z_load.imag:+.3f}j ohm\n"
+            f"Power basis [{r.power_normalization_plane}]: {r.power_normalization_power_w:.2f} W\n"
+            "NO 50-OHM CABLE STANDING-WAVE TRANSFORMATION"
+            if r.direct_load_reference_vpp_v is not None and r.direct_load_reference_vrms_v is not None
+            else "DIRECT-LOAD REFERENCE\nNot Available"
+        )
+        self.standing_max_card.setText(
+            "CABLE MAXIMUM VPP\n"
+            f"Maximum distributed Vpp: {r.maximum_voltage_vpp_v:.2f} V\n"
+            f"Maximum distributed Vrms: {r.maximum_voltage_rms_v:.2f} V\n"
+            f"From Match Output: {r.maximum_voltage_position_from_match_m:.3f} m\n"
+            f"From Cable End: {r.maximum_voltage_position_from_load_m:.3f} m"
+        )
+        measured_text = f"{r.measured_vpp_v:.2f} V" if r.measured_vpp_v is not None else "Not Provided"
+        measured_status = "MEASURED INPUT" if r.measured_vpp_v is not None else "NO MEASUREMENT"
+        self.standing_measured_card.setText(
+            "MEASURED VPP\n"
+            f"Measured Vpp: {measured_text}\n"
+            f"Source status: {measured_status}"
+        )
+        if r.vpp_residual_v is None or r.vpp_residual_percent is None:
+            self.standing_residual_card.setText("MODEL VPP RESIDUAL\nNot Available")
+        else:
+            self.standing_residual_card.setText(
+                "MODEL VPP RESIDUAL\n"
+                f"Residual [V]: {r.vpp_residual_v:+.2f}\n"
+                f"Residual [%]: {r.vpp_residual_percent:+.2f}%\n"
+                "MODEL AGREEMENT only. Close agreement alone does not prove full physical validity."
+            )
+
+        z = r.z_m
+        v_forward = np.abs(r.v_forward)
+        v_reflected = np.abs(r.v_reflected)
+        v_total = np.abs(r.v_rms)
+        vpp_total = r.vpp
+        pfwd = r.forward_power_w
+        pref = r.reflected_power_w
+        pnet = r.net_traveling_wave_power_w
+        matched_vpp_50 = 2.0 * np.sqrt(2.0) * np.sqrt(max(r.power_normalization_power_w, 0.0) * 50.0)
+        fig = self.standing_wave_canvas.figure
+        fig.clear()
+        axes = fig.subplots(3, 1, sharex=True)
+        ax = axes[0]
+        ax_vpp = axes[1]
+        ax_power = axes[2]
+        ax.plot(z, v_forward, color="#22d3ee", linestyle="--", linewidth=1.6, label="Forward Voltage Magnitude")
+        ax.plot(z, v_reflected, color="#a78bfa", linestyle=":", linewidth=1.6, label="Reflected Voltage Magnitude")
+        ax.plot(z, v_total, color="#f97316", linestyle="-", linewidth=2.2, label="Total Voltage Magnitude")
+        vmax_x = r.maximum_voltage_position_from_match_m
+        vmin_x = r.minimum_voltage_position_from_match_m
+        ax.scatter([vmax_x], [r.maximum_voltage_rms_v], color="#ef4444", marker="*", s=180, zorder=12, label="VOLTAGE MAXIMUM")
+        ax.scatter([vmin_x], [r.minimum_voltage_rms_v], color="#38bdf8", marker="v", s=90, zorder=11, label="Voltage Minimum")
+        ax.axvline(0.0, color="#22c55e", linestyle="-.", linewidth=1.0)
+        ax.axvline(float(z[-1]), color="#4ade80", linestyle="-.", linewidth=1.0)
+        if r.connector_interface_index is not None:
+            ax.axvline(float(z[r.connector_interface_index]), color="#94a3b8", linestyle="--", linewidth=1.0)
+        try:
+            z_probe = self._probe_input_to_global(float(self.probe_pos.text()))
+            ax.axvline(z_probe, color="#facc15", linestyle="--", linewidth=1.2)
+            ax_vpp.axvline(z_probe, color="#facc15", linestyle="--", linewidth=1.2)
+            ax_power.axvline(z_probe, color="#facc15", linestyle="--", linewidth=1.2)
+        except ValueError:
+            pass
+        ax.set_title("FORWARD + REFLECTED = TOTAL VOLTAGE")
+        ax.set_ylabel("Voltage RMS [V]")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="upper right")
+        ax.text(
+            0.01,
+            0.02,
+            "Forward Wave ----->    Reflected Wave <-----\n"
+            "Standing-wave voltage is produced by vector addition of forward and reflected voltage waves.\n"
+            "Net real power can remain much smaller than local voltage/current stress.",
+            transform=ax.transAxes,
+            fontsize=8,
+            color="#cbd5e1",
+            verticalalignment="bottom",
+        )
+        ax.text(
+            0.99,
+            0.98,
+            f"Power normalization plane: {r.power_normalization_plane} | P(ref)={r.power_normalization_power_w:.2f} W",
+            transform=ax.transAxes,
+            fontsize=8,
+            color="#f8fafc",
+            horizontalalignment="right",
+            verticalalignment="top",
+        )
+        ax_vpp.plot(z, vpp_total, color="#f97316", linewidth=2.2, label="Actual 50-ohm Cable Vpp (mismatched load)")
+        ax_vpp.axhline(matched_vpp_50, color="#22c55e", linestyle="--", linewidth=1.5, label="Ideal Matched 50-ohm Cable Vpp")
+        if r.direct_load_reference_vpp_v is not None:
+            ax_vpp.axhline(
+                r.direct_load_reference_vpp_v,
+                color="#60a5fa",
+                linestyle="-.",
+                linewidth=1.5,
+                label="Direct-Load Reference Vpp (no 50-ohm cable transformation)",
+            )
+        if r.measured_vpp_v is not None:
+            ax_vpp.axhline(r.measured_vpp_v, color="#4ade80", linestyle=":", linewidth=1.4, label="Measured Vpp")
+        ax_vpp.scatter([vmax_x], [r.maximum_voltage_vpp_v], color="#ef4444", marker="*", s=150, zorder=12, label="Actual Vpp Maximum")
+        ax_vpp.set_title("VPP COMPARISON: MISMATCH SIDE EFFECT")
+        ax_vpp.set_xlabel("Position from Match Output [m]")
+        ax_vpp.set_ylabel("Vpp [V]")
+        ax_vpp.grid(True, alpha=0.25)
+        ax_vpp.legend(loc="upper right")
+        if r.traveling_wave_available:
+            ax_power.plot(z, pfwd, color="#22d3ee", linewidth=2.0, label="Forward Traveling-Wave Power")
+            ax_power.plot(z, pref, color="#a855f7", linewidth=2.0, label="Reflected Traveling-Wave Power")
+            ax_power.plot(z, pnet, color="#22c55e", linewidth=2.0, label="Net Real Power")
+            ax_power.set_title("FORWARD / REFLECTED / NET POWER VS POSITION")
+            ax_power.set_ylabel("Power [W]")
+            ax_power.grid(True, alpha=0.25)
+            ax_power.legend(loc="upper right")
+        else:
+            ax_power.set_title("FORWARD / REFLECTED / NET POWER VS POSITION")
+            ax_power.text(
+                0.5,
+                0.5,
+                "TRAVELING-WAVE POWER DECOMPOSITION NOT AVAILABLE\nFOR CURRENT COMPLEX-Z0 CONVENTION",
+                transform=ax_power.transAxes,
+                ha="center",
+                va="center",
+                color="#fca5a5",
+                fontsize=9,
+            )
+            ax_power.set_ylabel("Power [W]")
+            ax_power.grid(True, alpha=0.25)
+        ax_power.set_xlabel("Position from Match Output [m]")
+        fig.tight_layout()
+        self.standing_wave_canvas.draw_idle()
+
+    def _on_standing_wave_click(self, event) -> None:
+        if self.last_result is None or event.inaxes is None or event.xdata is None:
+            return
+        r = self.last_result
+        tol = max(0.01, 0.01 * float(r.z_m[-1]))
+        if abs(float(event.xdata) - r.maximum_voltage_position_from_match_m) > tol:
+            return
+        self._set_probe_display_from_global(r.maximum_voltage_position_from_match_m)
+        self._update_probe_readout()
+        self._update_smith_probe_only()
+        self._draw_distribution()
+        self._draw_standing_wave_decomposition()
+        self._draw_stress_dashboard()
 
     def _draw_stress_dashboard(self) -> None:
         if self.last_result is None or self.last_stress_result is None:
@@ -2066,6 +2392,8 @@ class MainWindow(QMainWindow):
                 ax.axvline(self.last_result.min_impedance_z_m, color="#f97316", linestyle=":", linewidth=1.2, zorder=18)
             if self.last_result.max_current_z_m is not None:
                 ax.axvline(self.last_result.max_current_z_m, color="#a78bfa", linestyle="-.", linewidth=1.2, zorder=18)
+            ax.axvline(self.last_result.maximum_voltage_position_from_match_m, color="#ef4444", linestyle="-", linewidth=1.1, zorder=18)
+            ax.axvline(self.last_result.minimum_voltage_position_from_match_m, color="#38bdf8", linestyle="--", linewidth=1.0, zorder=18)
 
     def _position_index(self, pos_m: float) -> int:
         r = self.last_result
@@ -2111,6 +2439,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_standing_wave_decomposition()
         self._draw_stress_dashboard()
 
     def _on_probe_text(self) -> None:
@@ -2124,6 +2453,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_standing_wave_decomposition()
         self._draw_stress_dashboard()
 
     def _update_probe_readout(self) -> None:
@@ -2132,9 +2462,15 @@ class MainWindow(QMainWindow):
         z = self._probe_input_to_global(float(self.probe_pos.text()))
         probe = self._probe_state_at(z)
         r = self.last_result
+        traveling_probe_text = (
+            f" | Pfwd={probe['pfwd']:.2f} W | Pref={probe['pref']:.2f} W | Pnet={probe['pnet']:.2f} W"
+            if r.traveling_wave_available
+            else ""
+        )
         self.probe_values.setText(
             f"Probe {probe['z']:.3f} m (From Match) | Vrms={probe['vrms']:.2f} V | Irms={probe['irms']:.2f} A | "
             f"P={probe['p']:.2f} W | Local={probe['local']:.3f} W/m | Cum={probe['cum']:.3f} W"
+            f"{traveling_probe_text}"
         )
         z_ref = r.z0_reference
         z_ref_txt = (
@@ -2174,16 +2510,47 @@ class MainWindow(QMainWindow):
             f"|Gamma|: {abs(gamma):.4f}\n"
             f"Gamma Phase [deg]: {np.degrees(np.angle(gamma)):.2f}\n"
             f"Local VSWR: {vswr_text}\n"
-            f"Vrms={probe['vrms']:.2f} V | Vpp={2.0 * np.sqrt(2.0) * probe['vrms']:.2f} V | Irms={probe['irms']:.2f} A\n"
+            f"Vrms={probe['vrms']:.2f} V | Vpp={probe['vpp']:.2f} V | Irms={probe['irms']:.2f} A\n"
             f"Real RF Power P(z)={probe['p']:.2f} W | Local Dissipation={probe['local']:.3f} W/m | Cumulative Loss={probe['cum']:.3f} W\n"
             f"Smith Reference {z_ref_txt}"
             f"{probe_warning}"
+        )
+        v_f = probe["v_forward"]
+        v_r = probe["v_reflected"]
+        v_t = v_f + v_r
+        i_f = probe["i_forward"]
+        i_r = probe["i_reflected"]
+        i_t = i_f + i_r
+        traveling_probe_detail = (
+            f"Forward Traveling-Wave Power at Probe: {probe['pfwd']:.3f} W\n"
+            f"Reflected Traveling-Wave Power at Probe: {probe['pref']:.3f} W\n"
+            f"Net Real Power at Probe: {probe['pnet']:.3f} W\n"
+            f"Pfwd - Pref residual vs P(z): {(probe['pnet'] - probe['p']):+.4f} W\n"
+            if r.traveling_wave_available
+            else "Traveling-Wave Power Decomposition: NOT AVAILABLE FOR CURRENT COMPLEX-Z0 CONVENTION\n"
+        )
+        self.standing_probe_detail.setText(
+            "PROBE DETAIL PANEL\n"
+            f"Position from Match Output: {probe['z']:.3f} m\n"
+            f"Position from Cable End: {float(r.z_m[-1]) - probe['z']:.3f} m\n"
+            f"Section: {probe['section']}\n"
+            f"Forward Vrms: {abs(v_f):.3f} V, Forward Phase: {np.degrees(np.angle(v_f)):.2f} deg\n"
+            f"Reflected Vrms: {abs(v_r):.3f} V, Reflected Phase: {np.degrees(np.angle(v_r)):.2f} deg\n"
+            f"Total Vrms: {abs(v_t):.3f} V, Total Vpp: {probe['vpp']:.3f} V\n"
+            f"Iforward: {abs(i_f):.3f} A, Ireflected: {abs(i_r):.3f} A, Itotal: {abs(i_t):.3f} A\n"
+            f"Local impedance: {z_local.real:+.3f}{z_local.imag:+.3f}j ohm\n"
+            f"Real Power P(z): {probe['p']:.3f} W\n"
+            f"{traveling_probe_detail}"
+            f"Local Dissipation: {probe['local']:.4f} W/m\n"
+            f"Cumulative Loss: {probe['cum']:.3f} W\n"
+            f"Vtotal = Vforward + Vreflected = ({v_f.real:+.3f}{v_f.imag:+.3f}j) + ({v_r.real:+.3f}{v_r.imag:+.3f}j) = ({v_t.real:+.3f}{v_t.imag:+.3f}j)"
         )
         self.smith_probe_label.setText(
             f"PROBE IMPEDANCE\n{z_local.real:+.3f}{z_local.imag:+.3f}j ohm\n@ z = {probe['z']:.3f} m"
         )
         self.smith_probe_gamma_label.setText(f"PROBE |GAMMA|\n{abs(gamma):.4f}")
         self._draw_distribution()
+        self._draw_standing_wave_decomposition()
         self._draw_stress_dashboard()
 
     def _refresh_probe_table(self) -> None:
@@ -2242,9 +2609,16 @@ class MainWindow(QMainWindow):
         z_local = self._interpolate_complex(r.z_m, r.z_local_ohm, z_probe)
         gamma = self._interpolate_complex(r.z_m, r.gamma_local, z_probe)
         z_norm = self._interpolate_complex(r.z_m, r.z_normalized, z_probe)
+        v_forward = self._interpolate_complex(r.z_m, r.v_forward, z_probe)
+        v_reflected = self._interpolate_complex(r.z_m, r.v_reflected, z_probe)
+        i_forward = self._interpolate_complex(r.z_m, r.i_forward, z_probe)
+        i_reflected = self._interpolate_complex(r.z_m, r.i_reflected, z_probe)
         vrms = float(np.interp(z_probe, r.z_m, np.abs(r.v_rms)))
         irms = float(np.interp(z_probe, r.z_m, np.abs(r.i_rms)))
         pz = float(np.interp(z_probe, r.z_m, r.p_real_w))
+        pfwd = float(np.interp(z_probe, r.z_m, r.forward_power_w)) if r.traveling_wave_available else float("nan")
+        pref = float(np.interp(z_probe, r.z_m, r.reflected_power_w)) if r.traveling_wave_available else float("nan")
+        pnet = float(np.interp(z_probe, r.z_m, r.net_traveling_wave_power_w)) if r.traveling_wave_available else float("nan")
         local = float(np.interp(z_probe, r.z_m, r.p_total_loss_w_per_m))
         cum = float(np.interp(z_probe, r.z_m, r.p_cumulative_loss_w))
         section_index = int(np.argmin(np.abs(r.global_position_m - z_probe)))
@@ -2261,9 +2635,17 @@ class MainWindow(QMainWindow):
             "z_local": z_local,
             "gamma": gamma,
             "z_norm": z_norm,
+            "v_forward": v_forward,
+            "v_reflected": v_reflected,
+            "i_forward": i_forward,
+            "i_reflected": i_reflected,
             "vrms": vrms,
+            "vpp": 2.0 * np.sqrt(2.0) * vrms,
             "irms": irms,
             "p": pz,
+            "pfwd": pfwd,
+            "pref": pref,
+            "pnet": pnet,
             "local": local,
             "cum": cum,
             "valid_impedance": valid_impedance,
@@ -2369,8 +2751,8 @@ class MainWindow(QMainWindow):
 
         z_match = complex(r.z_local_ohm[0])
         z_end = complex(r.z_local_ohm[-1])
-        self.smith_match_label.setText(f"Load Impedance ZL\n{z_match.real:+.3f}{z_match.imag:+.3f}j ohm")
-        self.smith_end_label.setText(f"Chamber/Cable-End Impedance\n{z_end.real:+.3f}{z_end.imag:+.3f}j ohm")
+        self.smith_match_label.setText(f"Match Output / Cable Input Impedance\n{z_match.real:+.3f}{z_match.imag:+.3f}j ohm")
+        self.smith_end_label.setText(f"Cable-End Load ZL\n{z_end.real:+.3f}{z_end.imag:+.3f}j ohm")
         z0 = complex(r.z0_reference)
 
         def _gamma_from_z(z_value: complex | None) -> complex | None:
@@ -2403,6 +2785,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_standing_wave_decomposition()
         self._draw_stress_dashboard()
 
     def _on_probe_table_selection_changed(self) -> None:
@@ -2414,6 +2797,7 @@ class MainWindow(QMainWindow):
         self._update_probe_readout()
         self._update_smith_probe_only()
         self._draw_distribution()
+        self._draw_standing_wave_decomposition()
         self._draw_stress_dashboard()
 
     def run_sweep(self) -> None:
@@ -2517,6 +2901,22 @@ class MainWindow(QMainWindow):
                 )
                 w.writerow(["stress_comparison", "manufacturer_rating_status", s.manufacturer_rating_status])
             w.writerow([])
+            w.writerow(["SECTION", "key", "value"])
+            w.writerow(["standing_wave", "power_normalization_plane", r.power_normalization_plane])
+            w.writerow(["standing_wave", "power_normalization_power_w", r.power_normalization_power_w])
+            w.writerow(["standing_wave", "direct_load_reference_vpp", r.direct_load_reference_vpp_v])
+            w.writerow(["standing_wave", "maximum_distributed_vpp", r.maximum_voltage_vpp_v])
+            w.writerow(["standing_wave", "maximum_distributed_vpp_position_m", r.maximum_voltage_position_from_match_m])
+            w.writerow(["standing_wave", "measured_vpp", r.measured_vpp_v])
+            w.writerow(["standing_wave", "vpp_residual_v", r.vpp_residual_v])
+            w.writerow(["standing_wave", "vpp_residual_percent", r.vpp_residual_percent])
+            w.writerow(["standing_wave", "standing_wave_voltage_enhancement", r.standing_wave_voltage_enhancement])
+            w.writerow(["standing_wave", "traveling_wave_reference_plane", r.traveling_wave_reference_plane])
+            w.writerow(["standing_wave", "match_plane_forward_power_w", r.match_plane_forward_power_w])
+            w.writerow(["standing_wave", "match_plane_reflected_power_w", r.match_plane_reflected_power_w])
+            w.writerow(["standing_wave", "match_plane_net_power_w", r.match_plane_net_power_w])
+            w.writerow(["standing_wave", "match_plane_power_residual_w", r.match_plane_power_residual_w])
+            w.writerow([])
             w.writerow(
                 [
                     "global_position_from_match_m",
@@ -2526,6 +2926,9 @@ class MainWindow(QMainWindow):
                     "V_rms",
                     "I_rms",
                     "Net_Power_W",
+                    "forward_power_w",
+                    "reflected_power_w",
+                    "net_traveling_wave_power_w",
                     "P_cond_W_per_m",
                     "P_diel_W_per_m",
                     "Local_Dissipation_W_per_m",
@@ -2534,11 +2937,30 @@ class MainWindow(QMainWindow):
                     "Z_imag",
                     "Gamma_real",
                     "Gamma_imag",
+                    "forward_voltage_real",
+                    "forward_voltage_imag",
+                    "forward_voltage_rms",
+                    "forward_voltage_phase_deg",
+                    "reflected_voltage_real",
+                    "reflected_voltage_imag",
+                    "reflected_voltage_rms",
+                    "reflected_voltage_phase_deg",
+                    "total_voltage_rms",
+                    "total_voltage_vpp",
+                    "forward_current_real",
+                    "forward_current_imag",
+                    "reflected_current_real",
+                    "reflected_current_imag",
+                    "power_normalization_plane",
                 ]
             )
             for i in range(len(r.z_m)):
                 z_local = complex(r.z_local_ohm[i])
                 gamma = complex(r.gamma_local[i])
+                v_f = complex(r.v_forward[i])
+                v_r = complex(r.v_reflected[i])
+                i_f = complex(r.i_forward[i])
+                i_r = complex(r.i_reflected[i])
                 cable_pos = r.position_from_flexible_cable_start_m[i]
                 w.writerow(
                     [
@@ -2549,6 +2971,9 @@ class MainWindow(QMainWindow):
                         float(np.abs(r.v_rms[i])),
                         float(np.abs(r.i_rms[i])),
                         r.p_real_w[i],
+                        r.forward_power_w[i],
+                        r.reflected_power_w[i],
+                        r.net_traveling_wave_power_w[i],
                         r.p_cond_w_per_m[i],
                         r.p_diel_w_per_m[i],
                         r.p_total_loss_w_per_m[i],
@@ -2557,6 +2982,21 @@ class MainWindow(QMainWindow):
                         z_local.imag,
                         gamma.real,
                         gamma.imag,
+                        v_f.real,
+                        v_f.imag,
+                        abs(v_f),
+                        np.degrees(np.angle(v_f)),
+                        v_r.real,
+                        v_r.imag,
+                        abs(v_r),
+                        np.degrees(np.angle(v_r)),
+                        float(np.abs(r.v_rms[i])),
+                        float(r.vpp[i]),
+                        i_f.real,
+                        i_f.imag,
+                        i_r.real,
+                        i_r.imag,
+                        r.power_normalization_plane,
                     ]
                 )
 
@@ -2584,6 +3024,16 @@ class MainWindow(QMainWindow):
             return
         pixmap = self.stress_tab.grab()
         pixmap.save(path, "PNG")
+
+    def export_standing_wave_image(self) -> None:
+        if self.last_result is None:
+            return
+        freq = self._active_frequency_mhz()
+        default_name = self._safe_windows_filename(f"standing_wave_voltage_{freq:.0f}MHz.png")
+        path, _ = QFileDialog.getSaveFileName(self, "Export Standing-Wave Decomposition Image", default_name, "PNG (*.png)")
+        if not path:
+            return
+        self.standing_wave_canvas.figure.savefig(path, dpi=200, bbox_inches="tight")
 
     def export_sweep_csv(self) -> None:
         if self.last_sweep is None:
@@ -2667,6 +3117,8 @@ class MainWindow(QMainWindow):
             f"Reference planes:\n"
             f"Match Input -> Matcher -> Match Output -> Connector/Transition -> Flexible Cable Start -> Cable End/Chamber\n\n"
             f"{ideal_note}"
+            f"POWER NORMALIZATION PLANE = {r.power_normalization_plane}\n"
+            f"P(z=0) = {r.p_real_w[0]:.3f} W | P(z=L) = {r.p_real_w[-1]:.3f} W\n\n"
             f"ACTIVE LOAD MODE = {r.active_load_mode_label}\n"
             f"Source Impedance ZS = {r.matcher_source_impedance_zs.real:+.3f}{r.matcher_source_impedance_zs.imag:+.3f}j ohm\n"
             f"Matcher Input Impedance Zin = {zin_text}\n"
@@ -2683,12 +3135,36 @@ class MainWindow(QMainWindow):
             f"Flexible Cable Dissipation Power = {r.flexible_cable_total_loss_w:.3f} W\n"
             f"Cable End Delivered Power = {r.chamber_power_w:.3f} W\n"
             f"Power Balance Error = {r.power_balance_error_w:.6f} W ({r.power_balance_error_percent:.4f}%)\n\n"
+            "TRAVELING-WAVE POWER DECOMPOSITION\n"
+            "Reference Plane: Match Output / Cable Input\n"
+            "Position: z = 0 m\n"
+            f"Forward Traveling-Wave Power: {r.match_plane_forward_power_w if r.match_plane_forward_power_w is not None else 'N/A'} W\n"
+            f"Reflected Traveling-Wave Power: {r.match_plane_reflected_power_w if r.match_plane_reflected_power_w is not None else 'N/A'} W\n"
+            f"Net Real Power: {r.match_plane_net_power_w if r.match_plane_net_power_w is not None else 'N/A'} W\n"
+            f"Match Output Power: {r.match_output_power_w:.3f} W\n"
+            f"Pfwd - Pref residual: {r.match_plane_power_residual_w if r.match_plane_power_residual_w is not None else 'N/A'} W "
+            f"({r.match_plane_power_residual_percent if r.match_plane_power_residual_percent is not None else 'N/A'} %)\n"
+            f"Traveling-wave vs V*conj(I) max residual: {r.max_traveling_wave_vi_residual_w if r.max_traveling_wave_vi_residual_w is not None else 'N/A'} W\n"
+            f"Reflection Coefficient Magnitude: {abs(r.gamma_l):.4f}\n"
+            f"Reflection Coefficient Phase: {r.gamma_phase_deg:.2f} deg\n"
+            f"VSWR: {r.vswr:.4f}\n\n"
             f"Match Efficiency = {eta_match:.3f}%\n"
             f"Cable Efficiency = {eta_cable:.3f}%\n"
             f"Total Delivery Efficiency = {eta_total:.3f}%\n\n"
             f"Gamma_L = {abs(r.gamma_l):.4f} ∠ {r.gamma_phase_deg:.2f} deg, "
             f"VSWR = {r.vswr:.4f}, Return Loss = {r.return_loss_db:.2f} dB\n"
-            f"Electrical length = {r.electrical_length_deg:.2f} deg\n\n"
+            f"Electrical length = {r.electrical_length_deg:.2f} deg\n"
+            f"Wavelength = {r.wavelength_m:.4f} m | Velocity Factor = {self.vf.text()} | alpha = {r.alpha_np_per_m:.6g} Np/m | beta = {r.beta_rad_per_m:.6g} rad/m\n\n"
+            "STANDING-WAVE VOLTAGE ANALYSIS\n"
+            f"Direct-load reference Vpp = {r.direct_load_reference_vpp_v if r.direct_load_reference_vpp_v is not None else 'N/A'} V\n"
+            f"Match-plane Vpp = {r.vpp[0]:.3f} V\n"
+            f"Cable maximum Vpp = {r.maximum_voltage_vpp_v:.3f} V @ {r.maximum_voltage_position_from_match_m:.3f} m from Match Output\n"
+            f"Cable-end Vpp = {r.vpp[-1]:.3f} V\n"
+            f"Measured Vpp = {r.measured_vpp_v if r.measured_vpp_v is not None else 'N/A'} V\n"
+            f"Model residual (Calculated - Measured) = {r.vpp_residual_v if r.vpp_residual_v is not None else 'N/A'} V "
+            f"({r.vpp_residual_percent if r.vpp_residual_percent is not None else 'N/A'} %)\n"
+            f"Standing-wave voltage enhancement = {r.standing_wave_voltage_enhancement if r.standing_wave_voltage_enhancement is not None else 'N/A'} x\n"
+            "Warning: Do not calculate operating current as Vmax/|ZL| unless Vmax and ZL are defined at the same physical reference plane.\n\n"
             f"Endpoint consistency (from V/I)\n"
             f"z=0 Delta_Z = {r.endpoint_match_delta_ohm.real:+.4g}{r.endpoint_match_delta_ohm.imag:+.4g}j ohm "
             f"(rel err {r.endpoint_match_rel_error:.3e})\n"
