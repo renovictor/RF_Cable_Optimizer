@@ -1,5 +1,12 @@
 # Changelog
 
+## V2026.11.1 - 2026-11-01
+
+- Wrapped the standing-wave decomposition and direct-load reference integration as the next release.
+- Confirmed power-normalization plane, distributed Vpp comparison, and Vmax/Vmin decomposition are aligned to the single RF model.
+- Added explicit measurement-vs-model residual and voltage-enhancement comparison to the summary and export outputs.
+- Updated version metadata to `V2026.11.1` for the release tag.
+
 ## V2026.10.10 - 2026-10-31
 
 - Improved System Input readability:
